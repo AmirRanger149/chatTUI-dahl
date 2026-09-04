@@ -1,95 +1,383 @@
-use crate::{api::client::ApiClient, config::Config, session::manager::SessionManager};
+use crate::api::client::ApiClient;
+use crate::config::Config;
+use crate::session::manager::SessionManager;
 use anyhow::Result;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    Insert,
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const PLACEHOLDER: &str = "Ask chatTUI to do anything";
+pub const MAX_COMPOSER_ROWS: usize = 8;
+const QUIT_PRIME_WINDOW: Duration = std::time::Duration::from_secs(2);
+
+pub struct SlashCmd {
+    pub name: &'static str,
+    pub desc: &'static str,
 }
 
-pub enum Action {
-    Quit,
-    EnterInsert,
-    EnterNormal,
-    Submit(String),
-    NewChat,
-    DeleteChat,
-    ToggleHistory,
-    ScrollUp,
-    ScrollDown,
-    Help,
-    CycleHistory,
+pub const SLASH_COMMANDS: &[SlashCmd] = &[
+    SlashCmd { name: "/help", desc: "Show keyboard shortcuts" },
+    SlashCmd { name: "/new", desc: "Start a new conversation" },
+    SlashCmd { name: "/history", desc: "Browse saved conversations" },
+    SlashCmd { name: "/model", desc: "Switch model — /model <model-id>" },
+    SlashCmd { name: "/quit", desc: "Exit chatTUI" },
+];
+
+/// A rendered entry of the conversation transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell {
+    User(String),
+    Assistant(String),
+    Error(String),
+    Notice(String),
+}
+
+/// Full-screen popups rendered on top of the interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    Shortcuts,
+    History { selected: usize },
 }
 
 pub struct App {
     pub config: Config,
     pub sessions: SessionManager,
-    pub mode: Mode,
-    pub show_history: bool,
-    pub scroll: u16,
-    pub streaming: bool,
-    pub error: Option<String>,
+    pub cells: Vec<Cell>,
     pub response: String,
+    pub streaming: bool,
+    pub stream_started: Option<Instant>,
     pub tokens: Option<Receiver<Result<String>>>,
+    pub composer: String,
+    pub prompt_history: Vec<String>,
+    pub history_nav: Option<(usize, String)>,
+    pub scroll_from_bottom: u16,
+    pub overlay: Option<Overlay>,
+    pub slash_selected: usize,
+    pub quit_primed_at: Option<Instant>,
+    pub should_quit: bool,
 }
 
 impl App {
     pub fn new(config: Config, sessions: SessionManager) -> Self {
-        Self {
+        let mut app = Self {
             config,
             sessions,
-            mode: Mode::Normal,
-            show_history: false,
-            scroll: 0,
-            streaming: false,
-            error: None,
+            cells: Vec::new(),
             response: String::new(),
+            streaming: false,
+            stream_started: None,
             tokens: None,
-        }
-    }
-    pub fn dispatch(&mut self, action: Action) -> bool {
-        match action {
-            Action::Quit => return false,
-            Action::EnterInsert => self.mode = Mode::Insert,
-            Action::EnterNormal => self.mode = Mode::Normal,
-            Action::NewChat => {
-                self.sessions.new_session();
-                self.response.clear();
-                self.error = None;
-            }
-            Action::DeleteChat => {
-                self.sessions.delete_current();
-                self.response.clear();
-                self.error = None;
-            }
-            Action::ToggleHistory => self.show_history = !self.show_history,
-            Action::CycleHistory => {
-                self.sessions.next_session();
-                self.response.clear();
-                self.error = None;
-            }
-            Action::ScrollUp => self.scroll = self.scroll.saturating_sub(2),
-            Action::ScrollDown => self.scroll = self.scroll.saturating_add(2),
-            Action::Help => {
-                self.error = Some(
-                    "i insert  Esc normal  Enter send  j/k scroll  h history  n new chat  q quit"
-                        .into(),
-                )
-            }
-            Action::Submit(text) => {
-                self.mode = Mode::Normal;
-                self.response.clear();
-                self.sessions.add_message("user", text);
-            }
-        }
-        true
+            composer: String::new(),
+            prompt_history: Vec::new(),
+            history_nav: None,
+            scroll_from_bottom: 0,
+            overlay: None,
+            slash_selected: 0,
+            quit_primed_at: None,
+            should_quit: false,
+        };
+        app.rebuild_cells();
+        app
     }
 
-    pub async fn start_stream(&mut self) -> Result<()> {
+    fn rebuild_cells(&mut self) {
+        self.cells = self
+            .sessions
+            .current()
+            .messages
+            .iter()
+            .map(|message| match message.role.as_str() {
+                "assistant" => Cell::Assistant(message.content.clone()),
+                _ => Cell::User(message.content.clone()),
+            })
+            .collect();
+    }
+
+    // -- transient UI actions -------------------------------------------------
+
+    /// `Esc`: close popups first, then interrupt a running stream, then clear the composer.
+    pub fn escape(&mut self) {
+        if self.overlay.take().is_some() {
+            return;
+        }
+        if self.streaming {
+            self.interrupt();
+            return;
+        }
+        if !self.composer.is_empty() {
+            self.composer.clear();
+            self.on_composer_changed();
+        }
+    }
+
+    pub fn interrupt(&mut self) {
+        self.tokens = None;
+        self.streaming = false;
+        self.stream_started = None;
+        self.finish_partial();
+    }
+
+    pub fn toggle_shortcuts(&mut self) {
+        self.overlay = match self.overlay {
+            Some(Overlay::Shortcuts) => None,
+            _ => Some(Overlay::Shortcuts),
+        };
+    }
+
+    pub fn toggle_history(&mut self) {
+        if self.overlay.is_some_and(|o| matches!(o, Overlay::History { .. })) {
+            self.overlay = None;
+        } else {
+            self.open_history();
+        }
+    }
+
+    pub fn open_history(&mut self) {
+        self.overlay = Some(Overlay::History {
+            selected: self.sessions.current_index(),
+        });
+    }
+
+    pub fn move_history_selection(&mut self, delta: i32) {
+        let len = self.sessions.len();
+        if len == 0 {
+            return;
+        }
+        if let Some(Overlay::History { selected }) = &mut self.overlay {
+            let next = (*selected as i32 + delta).rem_euclid(len as i32);
+            *selected = next as usize;
+        }
+    }
+
+    pub fn load_selected_session(&mut self) {
+        let Some(Overlay::History { selected }) = self.overlay else {
+            return;
+        };
+        if selected != self.sessions.current_index() {
+            self.sessions.select(selected);
+            self.rebuild_cells();
+            self.scroll_from_bottom = 0;
+        }
+        self.overlay = None;
+    }
+
+    pub fn delete_selected_session(&mut self) {
+        let Some(Overlay::History { selected }) = self.overlay else {
+            return;
+        };
+        if self.sessions.len() <= 1 {
+            return;
+        }
+        let was_current = selected == self.sessions.current_index();
+        self.sessions.delete_at(selected);
+        let len = self.sessions.len();
+        if let Some(Overlay::History { selected }) = &mut self.overlay {
+            *selected = (*selected).min(len - 1);
+        }
+        if was_current {
+            self.rebuild_cells();
+            self.scroll_from_bottom = 0;
+        }
+    }
+
+    pub fn scroll(&mut self, delta: i32) {
+        let next = self.scroll_from_bottom as i32 + delta;
+        self.scroll_from_bottom = next.clamp(0, u16::MAX as i32) as u16;
+    }
+
+    // -- composer --------------------------------------------------------------
+
+    pub fn on_composer_changed(&mut self) {
+        self.slash_selected = 0;
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        self.composer.push_str(&text.replace("\r\n", "\n"));
+        self.on_composer_changed();
+    }
+
+    pub fn recall_prev(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        match self.history_nav {
+            None => {
+                let index = self.prompt_history.len() - 1;
+                self.history_nav = Some((index, self.composer.clone()));
+                self.composer = self.prompt_history[index].clone();
+            }
+            Some((index, ref draft)) => {
+                if index > 0 {
+                    self.history_nav = Some((index - 1, draft.clone()));
+                    self.composer = self.prompt_history[index - 1].clone();
+                }
+            }
+        }
+    }
+
+    pub fn recall_next(&mut self) {
+        let Some((index, draft)) = self.history_nav.take() else {
+            return;
+        };
+        if index + 1 < self.prompt_history.len() {
+            self.history_nav = Some((index + 1, draft));
+            self.composer = self.prompt_history[index + 1].clone();
+        } else {
+            self.composer = draft;
+        }
+    }
+
+    /// Tab: complete the highlighted slash command into the composer.
+    pub fn accept_slash(&mut self) {
+        let Some(name) = self
+            .slash_filtered()
+            .get(self.slash_selected)
+            .map(|command| command.name)
+        else {
+            return;
+        };
+        self.composer = format!("{} ", name);
+        self.on_composer_changed();
+    }
+
+    pub fn slash_up(&mut self) {
+        let len = self.slash_filtered().len();
+        if len > 0 {
+            self.slash_selected = (self.slash_selected + len - 1) % len;
+        }
+    }
+
+    pub fn slash_down(&mut self) {
+        let len = self.slash_filtered().len();
+        if len > 0 {
+            self.slash_selected = (self.slash_selected + 1) % len;
+        }
+    }
+
+    /// The slash popup is open while the composer starts with `/` and an
+    /// unambiguous command prefix is being typed.
+    pub fn slash_filtered(&self) -> Vec<&'static SlashCmd> {
+        if self.overlay.is_some() {
+            return Vec::new();
+        }
+        let text = self.composer.trim_start();
+        if !text.starts_with('/') {
+            return Vec::new();
+        }
+        let rest = &text[1..];
+        if rest.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        SLASH_COMMANDS
+            .iter()
+            .filter(|command| command.name[1..].starts_with(rest))
+            .collect()
+    }
+
+    pub fn slash_open(&self) -> bool {
+        !self.slash_filtered().is_empty()
+    }
+
+    /// `Enter`: dispatch the highlighted slash command, run a typed command,
+    /// or send the message to the model.
+    pub fn submit(&mut self) {
+        if self.overlay.is_some() || self.streaming {
+            return;
+        }
+        if self.slash_open() {
+            let name = match self.slash_filtered().get(self.slash_selected) {
+                Some(command) => command.name.to_string(),
+                None => return,
+            };
+            self.composer.clear();
+            self.history_nav = None;
+            self.run_command(&name);
+            return;
+        }
+        let text = self.composer.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.composer.clear();
+        self.history_nav = None;
+        if text.starts_with('/') {
+            self.run_command(&text);
+            return;
+        }
+        self.prompt_history.push(text.clone());
+        self.cells.push(Cell::User(text.clone()));
+        self.sessions.add_message("user", text);
+        if let Err(error) = self.start_stream() {
+            self.push_error(error.to_string());
+        }
+    }
+
+    fn run_command(&mut self, text: &str) {
+        let mut parts = text.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+        let argument = parts.next().unwrap_or("").trim().to_string();
+        match command.as_str() {
+            "/help" => self.overlay = Some(Overlay::Shortcuts),
+            "/new" => self.new_chat(),
+            "/history" => self.open_history(),
+            "/model" => {
+                if argument.is_empty() {
+                    self.push_error("usage: /model <model-id>".into());
+                } else {
+                    self.config.model = argument.clone();
+                    self.push_notice(format!("model set to {argument}"));
+                }
+            }
+            "/quit" => self.should_quit = true,
+            other => self.push_error(format!("unknown command: {other} — try /help")),
+        }
+    }
+
+    pub fn new_chat(&mut self) {
+        if self.sessions.current().messages.is_empty() {
+            self.push_notice("already in a new conversation".into());
+            return;
+        }
+        self.sessions.new_session();
+        self.rebuild_cells();
+        self.scroll_from_bottom = 0;
+    }
+
+    // -- quit flow --------------------------------------------------------------
+
+    pub fn prime_quit(&mut self) {
+        if self.quit_primed() {
+            self.should_quit = true;
+        } else {
+            self.quit_primed_at = Some(Instant::now());
+        }
+    }
+
+    pub fn quit_primed(&self) -> bool {
+        self.quit_primed_at
+            .is_some_and(|at| at.elapsed() < QUIT_PRIME_WINDOW)
+    }
+
+    // -- streaming ----------------------------------------------------------------
+
+    pub fn elapsed_secs(&self) -> u64 {
+        self.stream_started
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0)
+    }
+
+    pub fn elapsed_ms(&self) -> u64 {
+        self.stream_started
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn start_stream(&mut self) -> Result<()> {
         let Some(api_key) = self.config.api_key.clone() else {
-            return Err(anyhow::anyhow!("DAHL_API_KEY is not configured"));
+            return Err(anyhow::anyhow!(
+                "DAHL_API_KEY is not configured — set it in dahl.json or the environment"
+            ));
         };
         let (tx, rx) = mpsc::channel(64);
         let messages: Vec<(String, String)> = self
@@ -101,9 +389,9 @@ impl App {
             .collect();
         let model = self.config.model.clone();
         let temperature = self.config.temperature;
-        let api_key_client = ApiClient::new(api_key, self.config.base_url.clone());
+        let client = ApiClient::new(api_key, self.config.base_url.clone());
         tokio::spawn(async move {
-            if let Err(error) = api_key_client
+            if let Err(error) = client
                 .stream_chat(&messages, &model, temperature, tx.clone())
                 .await
             {
@@ -112,6 +400,7 @@ impl App {
         });
         self.tokens = Some(rx);
         self.streaming = true;
+        self.stream_started = Some(Instant::now());
         Ok(())
     }
 
@@ -122,7 +411,13 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(Ok(token)) => self.response.push_str(&token),
-                Ok(Err(error)) => self.error = Some(error.to_string()),
+                Ok(Err(error)) => {
+                    self.finish_partial();
+                    self.streaming = false;
+                    self.stream_started = None;
+                    self.push_error(error.to_string());
+                    return;
+                }
                 Err(TryRecvError::Empty) => {
                     self.tokens = Some(rx);
                     return;
@@ -131,10 +426,121 @@ impl App {
             }
         }
         self.streaming = false;
+        self.stream_started = None;
+        self.finish_partial();
+    }
+
+    /// Commit an in-flight assistant response (used on completion and interrupt).
+    fn finish_partial(&mut self) {
         if !self.response.is_empty() {
-            self.sessions
-                .add_message("assistant", self.response.clone());
-            self.response.clear();
+            let text = std::mem::take(&mut self.response);
+            self.cells.push(Cell::Assistant(text.clone()));
+            self.sessions.add_message("assistant", text);
+        }
+    }
+
+    fn push_error(&mut self, message: String) {
+        self.cells.push(Cell::Error(message));
+    }
+
+    fn push_notice(&mut self, message: String) {
+        self.cells.push(Cell::Notice(message));
+    }
+
+    /// Right-hand footer summary, codex-style context indicator.
+    pub fn context_summary(&self) -> String {
+        let session = self.sessions.current();
+        let messages = session.messages.len();
+        let chars: usize = session.messages.iter().map(|m| m.content.len()).sum();
+        format!(
+            "{messages} msgs · ~{} tok",
+            crate::ui::theme::human_tokens(chars / 4)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Config::default(), SessionManager::for_tests())
+    }
+
+    #[test]
+    fn submit_routes_slash_commands() {
+        let mut app = test_app();
+        app.composer = "/model test-model".into();
+        app.submit();
+        assert_eq!(app.config.model, "test-model");
+        assert!(matches!(app.cells.last(), Some(Cell::Notice(_))));
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn slash_popup_filters_by_prefix() {
+        let mut app = test_app();
+        app.composer = "/m".into();
+        let names: Vec<&str> = app.slash_filtered().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["/model"]);
+        app.composer = "/model something".into();
+        assert!(!app.slash_open());
+    }
+
+    #[test]
+    fn unknown_command_is_reported_not_sent() {
+        let mut app = test_app();
+        app.composer = "/nope".into();
+        app.submit();
+        assert!(matches!(app.cells.last(), Some(Cell::Error(_))));
+        assert!(app.sessions.current().messages.is_empty());
+    }
+
+    #[test]
+    fn prompt_history_recalls_and_restores_draft() {
+        let mut app = test_app();
+        app.composer = "first".into();
+        app.prompt_history.push("first".into());
+        app.composer = "draft".into();
+        app.recall_prev();
+        assert_eq!(app.composer, "first");
+        app.recall_next();
+        assert_eq!(app.composer, "draft");
+    }
+
+    #[test]
+    fn escape_closes_overlay_before_stream() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Shortcuts);
+        app.escape();
+        assert!(app.overlay.is_none());
+        app.streaming = true;
+        app.response = "partial".into();
+        app.escape();
+        assert!(!app.streaming);
+        assert!(matches!(app.cells.last(), Some(Cell::Assistant(_))));
+    }
+
+    #[test]
+    fn quit_needs_double_ctrl_c() {
+        let mut app = test_app();
+        app.prime_quit();
+        assert!(!app.should_quit);
+        app.prime_quit();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn history_overlay_moves_and_clamps() {
+        let mut app = test_app();
+        app.sessions.new_session();
+        app.sessions.new_session();
+        app.open_history();
+        app.move_history_selection(5);
+        if let Some(Overlay::History { selected }) = app.overlay {
+            assert!(selected < app.sessions.len());
+        } else {
+            panic!("history overlay should be open");
         }
     }
 }

@@ -69,6 +69,30 @@ impl SessionManager {
         self.store.current
     }
 
+    pub fn len(&self) -> usize {
+        self.store.sessions.len()
+    }
+
+    pub fn select(&mut self, index: usize) {
+        if index < self.store.sessions.len() {
+            self.store.current = index;
+            let _ = self.save();
+        }
+    }
+
+    pub fn delete_at(&mut self, index: usize) {
+        if self.store.sessions.len() <= 1 || index >= self.store.sessions.len() {
+            return;
+        }
+        self.store.sessions.remove(index);
+        if self.store.current == index {
+            self.store.current = self.store.current.min(self.store.sessions.len() - 1);
+        } else if self.store.current > index {
+            self.store.current -= 1;
+        }
+        let _ = self.save();
+    }
+
     pub fn next_session(&mut self) {
         if !self.store.sessions.is_empty() {
             self.store.current = (self.store.current + 1) % self.store.sessions.len();
@@ -114,5 +138,17 @@ impl SessionManager {
         }
         session.messages.push(message);
         let _ = self.save();
+    }
+}
+
+#[cfg(test)]
+impl SessionManager {
+    pub fn for_tests() -> Self {
+        let mut manager = Self {
+            store: Store::default(),
+            path: std::env::temp_dir().join("chat-tui-test-sessions.json"),
+        };
+        manager.new_session();
+        manager
     }
 }

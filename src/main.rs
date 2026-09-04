@@ -5,133 +5,152 @@ mod session;
 mod ui;
 
 use anyhow::Result;
-use app::{Action, App, Mode};
+use app::App;
 use config::Config;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use session::manager::SessionManager;
 use std::io::{self, stdout};
-use tokio::time::{self, Duration};
+use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load()?;
-    let sessions = session::manager::SessionManager::load()?;
+    let sessions = SessionManager::load()?;
     let mut app = App::new(config, sessions);
-    let mut input = String::new();
     let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, &mut app, &mut input).await;
+    let result = run(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
     result
 }
 
-async fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-    input: &mut String,
-) -> Result<()> {
-    let mut tick = time::interval(Duration::from_millis(50));
+async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(|frame| ui::render(frame, app, input))?;
-        tick.tick().await;
         app.receive_token().await;
-        if event::poll(Duration::from_millis(1))? {
-            if let Event::Key(key) = event::read()? {
-                if !handle_key(app, input, key).await? {
+        terminal.draw(|frame| ui::render(frame, app))?;
+
+        if event::poll(Duration::from_millis(50))? {
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if !handle_key(app, key) {
+                            return Ok(());
+                        }
+                    }
+                    Event::Paste(text) => app.paste(&text),
+                    _ => {}
+                }
+                if !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
         }
+        if app.should_quit {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
-async fn handle_key(app: &mut App, input: &mut String, key: KeyEvent) -> Result<bool> {
-    match app.mode {
-        Mode::Normal => match key.code {
-            KeyCode::Char('i') => {
-                app.dispatch(Action::EnterInsert);
-                Ok(true)
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                app.dispatch(Action::ScrollDown);
-                Ok(true)
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                app.dispatch(Action::ScrollUp);
-                Ok(true)
-            }
-            KeyCode::PageDown => {
-                app.dispatch(Action::ScrollDown);
-                Ok(true)
-            }
-            KeyCode::PageUp => {
-                app.dispatch(Action::ScrollUp);
-                Ok(true)
-            }
-            KeyCode::Char('h') => {
-                app.dispatch(Action::ToggleHistory);
-                Ok(true)
-            }
-            KeyCode::Char('H') => {
-                app.dispatch(Action::CycleHistory);
-                Ok(true)
-            }
-            KeyCode::Char('n') => {
-                app.dispatch(Action::NewChat);
-                Ok(true)
-            }
-            KeyCode::Char('?') => {
-                app.dispatch(Action::Help);
-                Ok(true)
-            }
-            KeyCode::Char('q') => Ok(app.dispatch(Action::Quit)),
-            KeyCode::Char('d') => {
-                app.dispatch(Action::DeleteChat);
-                Ok(true)
-            }
-            _ => Ok(true),
-        },
-        Mode::Insert => match key.code {
-            KeyCode::Esc => {
-                app.dispatch(Action::EnterNormal);
-                Ok(true)
-            }
-            KeyCode::Enter => {
-                if !input.trim().is_empty() {
-                    let text = std::mem::take(input);
-                    app.dispatch(Action::Submit(text));
-                    if let Err(error) = app.start_stream().await {
-                        app.error = Some(error.to_string());
-                    }
-                }
-                Ok(true)
-            }
-            KeyCode::Backspace => {
-                input.pop();
-                Ok(true)
-            }
-            KeyCode::Char(ch) if key.modifiers.is_empty() => {
-                input.push(ch);
-                Ok(true)
-            }
-            _ => Ok(true),
-        },
+/// Returns `false` when the app should exit.
+fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // ctrl+c: press twice within 2s to quit, from any state.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.prime_quit();
+        return !app.should_quit;
     }
+
+    // Global keys.
+    match key.code {
+        KeyCode::Esc => {
+            app.escape();
+            return true;
+        }
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_history();
+            return true;
+        }
+        KeyCode::PageUp => {
+            app.scroll(-10);
+            return true;
+        }
+        KeyCode::PageDown => {
+            app.scroll(10);
+            return true;
+        }
+        _ => {}
+    }
+
+    // Overlays consume remaining keys.
+    match app.overlay {
+        Some(app::Overlay::Shortcuts) => {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) {
+                app.overlay = None;
+            }
+            return true;
+        }
+        Some(app::Overlay::History { .. }) => {
+            match key.code {
+                KeyCode::Up => app.move_history_selection(-1),
+                KeyCode::Down => app.move_history_selection(1),
+                KeyCode::Enter => app.load_selected_session(),
+                KeyCode::Char('d') => app.delete_selected_session(),
+                _ => {}
+            }
+            return true;
+        }
+        None => {}
+    }
+
+    // The composer is always active, like codex.
+    match key.code {
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.composer.push('\n');
+            app.on_composer_changed();
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.composer.push('\n');
+            app.on_composer_changed();
+        }
+        KeyCode::Enter => app.submit(),
+        KeyCode::Tab => app.accept_slash(),
+        KeyCode::Backspace => {
+            app.composer.pop();
+            app.on_composer_changed();
+        }
+        KeyCode::Up if app.slash_open() => app.slash_up(),
+        KeyCode::Down if app.slash_open() => app.slash_down(),
+        KeyCode::Up => app.recall_prev(),
+        KeyCode::Down => app.recall_next(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.composer.clear();
+            app.on_composer_changed();
+        }
+        KeyCode::Char('?') if app.composer.is_empty() => app.toggle_shortcuts(),
+        KeyCode::Char(ch)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.composer.push(ch);
+            app.on_composer_changed();
+        }
+        _ => {}
+    }
+    true
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
+    execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, event::DisableBracketedPaste)?;
     terminal.show_cursor()?;
     Ok(())
 }
