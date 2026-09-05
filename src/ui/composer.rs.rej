@@ -1,0 +1,231 @@
+--- src/ui/composer.rs
++++ src/ui/composer.rs
+@@ -1,51 +1,127 @@
+ //! The codex-style bottom pane: a borderless `› ` composer that grows with
+ //! content, the slash-command popup anchored above it, and the hint/context
+-//! footer row.
++//! footer row. The composer keeps a real editing cursor, so typing,
++//! backspace and cursor/word navigation all act at the cursor position.
+ 
+ use crate::app::{App, MAX_COMPOSER_ROWS};
+ use crate::ui::theme;
+ use ratatui::prelude::*;
+ use ratatui::widgets::Paragraph;
+-use unicode_width::UnicodeWidthStr;
++use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
++
++/// Display width of the `› ` / continuation prefix in front of every row.
++const PREFIX_W: usize = 2;
++
++/// The composer's wrapped rows plus the cursor's position within them.
++struct Layout {
++    rows: Vec<String>,
++    cursor_row: usize,
++    /// Display column of the cursor, including the row prefix.
++    cursor_col: usize,
++}
+ 
+ /// Number of wrapped rows the composer needs at `width`.
+ pub fn row_count(app: &App, width: u16) -> u16 {
+-    wrapped_rows(app, width.max(4) as usize).len() as u16
++    let rows = layout(app, width.max(4) as usize).rows.len();
++    rows.min(MAX_COMPOSER_ROWS).max(1) as u16
+ }
+ 
+-fn wrapped_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+-    if app.composer.is_empty() {
+-        return vec![Line::from(vec![
+-            theme::user_prefix(),
+-            Span::styled(crate::app::PLACEHOLDER.to_string(), theme::dim()),
+-        ])];
++/// Wrap the composer text and locate the cursor inside the wrapped rows.
++fn layout(app: &App, width: usize) -> Layout {
++    let limit = width.saturating_sub(PREFIX_W).max(1);
++    let cursor_char = app.composer[..app.cursor.min(app.composer.len())]
++        .chars()
++        .count();
++
++    let mut rows: Vec<String> = Vec::new();
++    let mut cursor_row = 0usize;
++    let mut cursor_col = PREFIX_W;
++    let mut consumed = 0usize; // chars consumed so far, incl. '\n' separators
++    let mut found = false;
++
++    for segment in app.composer.split('\n') {
++        let seg_chars = segment.chars().count();
++        let base = rows.len();
++        let wrapped = wrap_rows(segment, limit);
++        if !found && cursor_char >= consumed && cursor_char <= consumed + seg_chars {
++            let local = cursor_char - consumed;
++            let mut acc = 0usize;
++            for (index, row) in wrapped.iter().enumerate() {
++                let row_chars = row.chars().count();
++                if local <= acc + row_chars {
++                    let in_row = local - acc;
++                    let byte = row
++                        .char_indices()
++                        .nth(in_row)
++                        .map(|(i, _)| i)
++                        .unwrap_or(row.len());
++                    cursor_row = base + index;
++                    cursor_col = PREFIX_W + row[..byte].width();
++                    found = true;
++                    break;
++                }
++                acc += row_chars;
++            }
++            if !found {
++                // Cursor sits past the last wrapped row: pin to its end.
++                cursor_row = base + wrapped.len().saturating_sub(1);
++                cursor_col = PREFIX_W
++                    + wrapped
++                        .last()
++                        .map(String::as_str)
++                        .unwrap_or("")
++                        .width();
++                found = true;
++            }
++        }
++        rows.extend(wrapped);
++        consumed += seg_chars + 1;
+     }
+-    // Support explicit newlines (shift/alt+enter): wrap each segment.
+-    let mut rows: Vec<Line<'static>> = Vec::new();
+-    for (index, segment) in app.composer.split('\n').enumerate() {
+-        let (first, cont) = if index == 0 {
+-            (theme::user_prefix(), Span::raw("  "))
+-        } else {
+-            (Span::raw("  "), Span::raw("  "))
+-        };
+-        rows.extend(theme::wrap_styled(
+-            vec![Span::raw(segment.to_string())],
+-            width,
+-            first,
+-            cont,
+-        ));
++
++    Layout {
++        rows,
++        cursor_row,
++        cursor_col,
+     }
+-    if rows.len() > MAX_COMPOSER_ROWS {
+-        // Keep the tail so the cursor stays visible, like codex's textarea.
+-        let keep = rows.split_off(rows.len() - MAX_COMPOSER_ROWS);
+-        let mut kept = keep;
+-        if let Some(first) = kept.first_mut() {
+-            if let Some(prefix) = first.spans.first_mut() {
+-                *prefix = Span::raw("  ");
++}
++
++/// Greedy word wrap whose rows concatenate back to the original text, so
++/// cursor offsets map exactly onto (row, column) positions.
++fn wrap_rows(text: &str, limit: usize) -> Vec<String> {
++    let mut rows: Vec<String> = Vec::new();
++    let mut current = String::new();
++    let mut used = 0usize;
++
++    let mut chars = text.chars().peekable();
++    loop {
++        // One token: leading whitespace plus the word that follows it.
++        let mut token = String::new();
++        while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
++            token.push(chars.next().unwrap());
++        }
++        while matches!(chars.peek(), Some(ch) if !ch.is_whitespace()) {
++            token.push(chars.next().unwrap());
++        }
++        if token.is_empty() {
++            break;
++        }
++        let token_w: usize = token.chars().filter_map(|ch| ch.width()).sum();
++        if used > 0 && used + token_w > limit {
++            rows.push(std::mem::take(&mut current));
++            used = 0;
++        }
++        // A token wider than a whole row is hard-split.
++        for ch in token.chars() {
++            let ch_w = ch.width().unwrap_or(0);
++            if used > 0 && used + ch_w > limit {
++                rows.push(std::mem::take(&mut current));
++                used = 0;
+             }
++            current.push(ch);
++            used += ch_w;
+         }
+-        return kept;
+     }
++    rows.push(current);
+     rows
+ }
+ 
+@@ -53,27 +129,56 @@ pub fn render_prompt(frame: &mut Frame, area: Rect, app: &App) -> Option<Positio
+     if area.width == 0 || area.height == 0 {
+         return None;
+     }
+-    let rows = wrapped_rows(app, area.width as usize);
+-    let visible = rows.len().min(area.height as usize);
+-    let start = rows.len().saturating_sub(visible);
+-    for (index, line) in rows[start..].iter().enumerate() {
++    if app.composer.is_empty() {
+         frame.render_widget(
+-            Paragraph::new(line.clone()),
++            Paragraph::new(Line::from(vec![
++                theme::user_prefix(),
++                Span::styled(crate::app::PLACEHOLDER.to_string(), theme::dim()),
++            ])),
++            Rect {
++                height: 1,
++                ..area
++            },
++        );
++        return Some(Position::new(area.x + PREFIX_W as u16, area.y));
++    }
++
++    let layout = layout(app, area.width as usize);
++    let total = layout.rows.len();
++    let window = total.min(MAX_COMPOSER_ROWS).min(area.height as usize);
++    if window == 0 {
++        return None;
++    }
++    // Pin to the bottom by default, but always keep the cursor row visible.
++    let mut start = total.saturating_sub(window);
++    if layout.cursor_row < start {
++        start = layout.cursor_row;
++    } else if layout.cursor_row >= start + window {
++        start = layout.cursor_row + 1 - window;
++    }
++
++    for (offset, row) in layout.rows[start..start + window].iter().enumerate() {
++        let prefix = if start + offset == 0 {
++            theme::user_prefix()
++        } else {
++            Span::raw("  ")
++        };
++        frame.render_widget(
++            Paragraph::new(Line::from(vec![prefix, Span::raw(row.clone())])),
+             Rect {
+                 x: area.x,
+-                y: area.y + index as u16,
++                y: area.y + offset as u16,
+                 width: area.width,
+                 height: 1,
+             },
+         );
+     }
+-    // The cursor always sits at the end of the text.
+-    let last = rows.last()?;
+-    let col = theme::line_width(last).min(area.width as usize - 1);
+-    Some(Position::new(
+-        area.x + col as u16,
+-        area.y + visible.saturating_sub(1) as u16,
+-    ))
++
++    let row_in_window = layout.cursor_row.saturating_sub(start) as u16;
++    let col = layout
++        .cursor_col
++        .min(area.width.saturating_sub(1) as usize) as u16;
++    Some(Position::new(area.x + col, area.y + row_in_window))
+ }
+ 
+ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {

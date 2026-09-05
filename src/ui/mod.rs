@@ -110,6 +110,13 @@ mod tests {
         app.open_history();
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
+        // code overlay
+        app.cells.push(crate::app::Cell::Assistant(
+            "```rust\nlet x = 1;\n```".into(),
+        ));
+        app.open_code();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
         // tiny terminal
         app.overlay = None;
         let mut tiny = Terminal::new(TestBackend::new(20, 6)).unwrap();

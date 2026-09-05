@@ -15,7 +15,8 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 - Local conversation history saved as JSON
 - History drawer for returning to previous chats
 - Configurable Dahl model, temperature, and API endpoint
-- Markdown-friendly response output
+- Markdown-friendly response output with shaded code boxes
+- Copy any code block from a response to the clipboard (`ctrl+g` or `/code`)
 - A single native Rust binary with no Python or OpenAI SDK dependency
 
 ## Before You Start

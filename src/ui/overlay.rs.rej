@@ -1,0 +1,55 @@
+--- src/ui/overlay.rs
++++ src/ui/overlay.rs
+@@ -5,7 +5,7 @@
+ use crate::app::{App, Overlay};
+ use crate::ui::theme;
+ use ratatui::prelude::*;
+-use ratatui::widgets::Paragraph;
++use ratatui::widgets::{Clear, Paragraph};
+ 
+ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
+     match overlay {
+@@ -15,12 +15,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
+ }
+ 
+ fn shortcuts(frame: &mut Frame, area: Rect) {
+-    let rows: [(&str, &str); 7] = [
++    let rows: [(&str, &str); 8] = [
+         ("enter", "send message"),
+         ("esc", "close popup · interrupt stream"),
+         ("ctrl+t", "conversation history"),
+         ("pgup / pgdn", "scroll transcript"),
+         ("up / down", "prompt history"),
++        ("← / →", "move cursor · ctrl jumps words"),
+         ("shift+enter", "newline in composer"),
+         ("ctrl+c ×2", "quit"),
+     ];
+@@ -72,7 +73,7 @@ fn history(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
+         render_card(frame, area, lines);
+         return;
+     }
+-    let max_rows = 12usize;
++    let max_rows = crate::app::HISTORY_ROWS;
+     let start = selected.saturating_sub(max_rows - 1);
+     let end = (start + max_rows).min(sessions.len());
+     for (index, session) in sessions[start..end].iter().enumerate() {
+@@ -109,8 +110,15 @@ fn render_card(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+     }
+     let x = area.x + (area.width.saturating_sub(width as u16)) / 2;
+     let y = area.y + (area.height.saturating_sub(height as u16)) / 2;
+-    frame.render_widget(
+-        Paragraph::new(bordered),
+-        Rect { x, y, width: width as u16, height: height as u16 },
+-    );
++    let rect = Rect {
++        x,
++        y,
++        width: width as u16,
++        height: height as u16,
++    };
++    // Erase everything underneath the card first. Without this, content drawn
++    // behind the popup — especially shaded code blocks in the transcript —
++    // bleeds into the card and the two layers visually fight each other.
++    frame.render_widget(Clear, rect);
++    frame.render_widget(Paragraph::new(bordered), rect);
+ }

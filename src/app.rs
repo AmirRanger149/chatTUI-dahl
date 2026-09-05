@@ -9,6 +9,9 @@ use tokio::sync::mpsc::{self, Receiver};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PLACEHOLDER: &str = "Ask chatTUI to do anything";
 pub const MAX_COMPOSER_ROWS: usize = 8;
+/// Number of rows visible inside overlay lists (history / code); also the
+/// page size for pgup/pgdn navigation within an overlay.
+pub const OVERLAY_ROWS: usize = 12;
 const QUIT_PRIME_WINDOW: Duration = std::time::Duration::from_secs(2);
 
 pub struct SlashCmd {
@@ -20,6 +23,7 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/help", desc: "Show keyboard shortcuts" },
     SlashCmd { name: "/new", desc: "Start a new conversation" },
     SlashCmd { name: "/history", desc: "Browse saved conversations" },
+    SlashCmd { name: "/code", desc: "Browse & copy code blocks" },
     SlashCmd { name: "/model", desc: "Switch model — /model <model-id>" },
     SlashCmd { name: "/quit", desc: "Exit chatTUI" },
 ];
@@ -38,6 +42,7 @@ pub enum Cell {
 pub enum Overlay {
     Shortcuts,
     History { selected: usize },
+    Code { selected: usize },
 }
 
 pub struct App {
@@ -49,6 +54,8 @@ pub struct App {
     pub stream_started: Option<Instant>,
     pub tokens: Option<Receiver<Result<String>>>,
     pub composer: String,
+    /// Byte offset of the editing cursor inside `composer` (char boundary).
+    pub cursor: usize,
     pub prompt_history: Vec<String>,
     pub history_nav: Option<(usize, String)>,
     pub scroll_from_bottom: u16,
@@ -69,6 +76,7 @@ impl App {
             stream_started: None,
             tokens: None,
             composer: String::new(),
+            cursor: 0,
             prompt_history: Vec::new(),
             history_nav: None,
             scroll_from_bottom: 0,
@@ -106,8 +114,7 @@ impl App {
             return;
         }
         if !self.composer.is_empty() {
-            self.composer.clear();
-            self.on_composer_changed();
+            self.clear_composer();
         }
     }
 
@@ -181,6 +188,75 @@ impl App {
         }
     }
 
+    // -- code blocks -----------------------------------------------------------
+
+    /// Every fenced code block in the conversation, in order. An in-flight
+    /// streamed response is included too, so code can be copied while it is
+    /// still being generated.
+    pub fn code_blocks(&self) -> Vec<crate::code::CodeBlock> {
+        let mut blocks = Vec::new();
+        for cell in &self.cells {
+            if let Cell::Assistant(text) = cell {
+                blocks.extend(crate::code::extract(text));
+            }
+        }
+        if !self.response.is_empty() {
+            blocks.extend(crate::code::extract(&self.response));
+        }
+        blocks
+    }
+
+    pub fn open_code(&mut self) {
+        if self.code_blocks().is_empty() {
+            self.push_error("no code blocks in this conversation yet".into());
+            return;
+        }
+        self.overlay = Some(Overlay::Code { selected: 0 });
+    }
+
+    pub fn toggle_code(&mut self) {
+        if self.overlay.is_some_and(|o| matches!(o, Overlay::Code { .. })) {
+            self.overlay = None;
+        } else {
+            self.open_code();
+        }
+    }
+
+    pub fn move_code_selection(&mut self, delta: i32) {
+        let len = self.code_blocks().len();
+        if len == 0 {
+            return;
+        }
+        if let Some(Overlay::Code { selected }) = &mut self.overlay {
+            *selected = (*selected as i32 + delta).rem_euclid(len as i32) as usize;
+        }
+    }
+
+    /// `Enter` in the code overlay: copy the selected block to the clipboard.
+    pub fn copy_selected_code(&mut self) {
+        let Some(Overlay::Code { selected }) = self.overlay else {
+            return;
+        };
+        let blocks = self.code_blocks();
+        let Some(block) = blocks.get(selected) else {
+            self.overlay = None;
+            return;
+        };
+        let lang = if block.lang.is_empty() {
+            "code".to_string()
+        } else {
+            block.lang.clone()
+        };
+        let line_count = block.code.lines().count();
+        match crate::clipboard::copy(&block.code) {
+            Ok(method) => self.push_notice(format!(
+                "copied {lang} block ({line_count} lines) via {method}"
+            )),
+            Err(error) => self.push_error(format!("clipboard failed: {error}")),
+        }
+        self.overlay = None;
+    }
+
     pub fn scroll(&mut self, delta: i32) {
         let next = self.scroll_from_bottom as i32 + delta;
         self.scroll_from_bottom = next.clamp(0, u16::MAX as i32) as u16;
@@ -192,8 +268,141 @@ impl App {
         self.slash_selected = 0;
     }
 
+    /// Clamp the cursor to a valid char boundary inside `composer`.
+    fn clamp_cursor(&mut self) {
+        if self.cursor > self.composer.len() || !self.composer.is_char_boundary(self.cursor) {
+            self.cursor = self.composer.len();
+        }
+    }
+
+    /// Replace the composer text and park the cursor at its end.
+    fn set_composer_text(&mut self, text: String) {
+        self.cursor = text.len();
+        self.composer = text;
+    }
+
+    pub fn clear_composer(&mut self) {
+        self.composer.clear();
+        self.cursor = 0;
+        self.on_composer_changed();
+    }
+
+    /// Insert a character at the cursor position.
+    pub fn insert_char(&mut self, ch: char) {
+        self.clamp_cursor();
+        self.composer.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    /// `shift+enter` / `alt+enter`: newline at the cursor position.
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    /// Backspace: delete the character before the cursor.
+    pub fn backspace(&mut self) {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return;
+        }
+        let prev = self.composer[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.composer.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
+    }
+
+    /// Move the cursor one letter to the left.
+    pub fn move_cursor_left(&mut self) {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.composer[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    /// Move the cursor one letter to the right.
+    pub fn move_cursor_right(&mut self) {
+        self.clamp_cursor();
+        if let Some(ch) = self.composer[self.cursor..].chars().next() {
+            self.cursor += ch.len_utf8();
+        }
+    }
+
+    /// Word navigation: jump to the start of the previous word.
+    pub fn move_word_left(&mut self) {
+        self.clamp_cursor();
+        let mut i = self.cursor;
+        // Skip whitespace, then the word itself.
+        while i > 0 {
+            let Some((index, ch)) = self.composer[..i].char_indices().next_back() else {
+                break;
+            };
+            if !ch.is_whitespace() {
+                break;
+            }
+            i = index;
+        }
+        while i > 0 {
+            let Some((index, ch)) = self.composer[..i].char_indices().next_back() else {
+                break;
+            };
+            if ch.is_whitespace() {
+                break;
+            }
+            i = index;
+        }
+        self.cursor = i;
+    }
+
+    /// Word navigation: jump to the start of the next word.
+    pub fn move_word_right(&mut self) {
+        self.clamp_cursor();
+        let len = self.composer.len();
+        let mut i = self.cursor;
+        // Skip the current word, then any whitespace after it.
+        while i < len {
+            let Some(ch) = self.composer[i..].chars().next() else {
+                break;
+            };
+            if ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
+        }
+        while i < len {
+            let Some(ch) = self.composer[i..].chars().next() else {
+                break;
+            };
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
+        }
+        self.cursor = i;
+    }
+
+    /// Home: jump to the start of the composer.
+    pub fn move_cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// End: jump to the end of the composer.
+    pub fn move_cursor_end(&mut self) {
+        self.cursor = self.composer.len();
+    }
+
     pub fn paste(&mut self, text: &str) {
-        self.composer.push_str(&text.replace("\r\n", "\n"));
+        self.clamp_cursor();
+        let cleaned = text.replace("\r\n", "\n");
+        self.composer.insert_str(self.cursor, &cleaned);
+        self.cursor += cleaned.len();
         self.on_composer_changed();
     }
 
@@ -205,12 +414,14 @@ impl App {
             None => {
                 let index = self.prompt_history.len() - 1;
                 self.history_nav = Some((index, self.composer.clone()));
-                self.composer = self.prompt_history[index].clone();
+                let text = self.prompt_history[index].clone();
+                self.set_composer_text(text);
             }
             Some((index, ref draft)) => {
                 if index > 0 {
                     self.history_nav = Some((index - 1, draft.clone()));
-                    self.composer = self.prompt_history[index - 1].clone();
+                    let text = self.prompt_history[index - 1].clone();
+                    self.set_composer_text(text);
                 }
             }
         }
@@ -222,9 +433,10 @@ impl App {
         };
         if index + 1 < self.prompt_history.len() {
             self.history_nav = Some((index + 1, draft));
-            self.composer = self.prompt_history[index + 1].clone();
+            let text = self.prompt_history[index + 1].clone();
+            self.set_composer_text(text);
         } else {
-            self.composer = draft;
+            self.set_composer_text(draft);
         }
     }
 
@@ -237,7 +449,7 @@ impl App {
         else {
             return;
         };
-        self.composer = format!("{} ", name);
+        self.set_composer_text(format!("{} ", name));
         self.on_composer_changed();
     }
 
@@ -291,6 +503,7 @@ impl App {
                 None => return,
             };
             self.composer.clear();
+            self.cursor = 0;
             self.history_nav = None;
             self.run_command(&name);
             return;
@@ -300,6 +513,7 @@ impl App {
             return;
         }
         self.composer.clear();
+        self.cursor = 0;
         self.history_nav = None;
         if text.starts_with('/') {
             self.run_command(&text);
@@ -321,6 +535,7 @@ impl App {
             "/help" => self.overlay = Some(Overlay::Shortcuts),
             "/new" => self.new_chat(),
             "/history" => self.open_history(),
+            "/code" => self.open_code(),
             "/model" => {
                 if argument.is_empty() {
                     self.push_error("usage: /model <model-id>".into());
@@ -528,6 +743,94 @@ mod tests {
         assert!(!app.should_quit);
         app.prime_quit();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn letter_navigation_moves_one_char_at_a_time() {
+        let mut app = test_app();
+        app.set_composer_text("aé b".into()); // 'é' is 2 bytes, len = 5
+        assert_eq!(app.cursor, 5);
+        app.move_cursor_left();
+        assert_eq!(app.cursor, 4); // before 'b'
+        app.move_cursor_left();
+        assert_eq!(app.cursor, 3); // before ' '
+        app.move_cursor_left();
+        assert_eq!(app.cursor, 1); // before 'é', on its byte boundary
+        app.move_cursor_left();
+        assert_eq!(app.cursor, 0);
+        app.move_cursor_left();
+        assert_eq!(app.cursor, 0); // stays at the start
+        app.move_cursor_right();
+        assert_eq!(app.cursor, 1);
+        app.move_cursor_right();
+        assert_eq!(app.cursor, 3); // 'é' is skipped as one letter
+        app.move_cursor_right();
+        app.move_cursor_right();
+        app.move_cursor_right();
+        assert_eq!(app.cursor, 5); // stays at the end
+    }
+
+    #[test]
+    fn word_navigation_jumps_between_words() {
+        let mut app = test_app();
+        app.set_composer_text("hello brave new world".into());
+        app.move_word_left();
+        assert_eq!(app.cursor, 16); // start of "world"
+        app.move_word_left();
+        assert_eq!(app.cursor, 12); // start of "new"
+        app.move_word_right();
+        assert_eq!(app.cursor, 16); // end of "new"
+        app.move_word_right();
+        assert_eq!(app.cursor, 21); // end of "world"
+        app.move_word_right();
+        assert_eq!(app.cursor, 21); // stays at the end
+        app.move_cursor_home();
+        assert_eq!(app.cursor, 0);
+        app.move_cursor_end();
+        assert_eq!(app.cursor, 21);
+    }
+
+    #[test]
+    fn editing_happens_at_cursor() {
+        let mut app = test_app();
+        app.set_composer_text("hello world".into());
+        app.move_word_left(); // cursor at 6, before "world"
+        app.insert_char('X');
+        assert_eq!(app.composer, "hello Xworld");
+        assert_eq!(app.cursor, 7);
+        app.backspace();
+        assert_eq!(app.composer, "hello world");
+        assert_eq!(app.cursor, 6);
+        app.paste("pasted\n");
+        assert_eq!(app.composer, "hello pasted\nworld");
+    }
+
+    #[test]
+    fn code_blocks_are_collected_from_assistant_messages() {
+        let mut app = test_app();
+        app.cells.push(Cell::Assistant(
+            "intro\n```rust\nlet x = 1;\n```\nmiddle\n```js\nlet y = 2;\n```".into(),
+        ));
+        app.response = "```py\nprint(1)".into(); // streamed, still unclosed
+        let blocks = app.code_blocks();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].lang, "rust");
+        assert_eq!(blocks[0].code, "let x = 1;");
+        assert_eq!(blocks[1].lang, "js");
+        assert_eq!(blocks[2].lang, "py");
+    }
+
+    #[test]
+    fn code_overlay_opens_only_with_blocks() {
+        let mut app = test_app();
+        app.open_code();
+        assert!(app.overlay.is_none());
+        assert!(matches!(app.cells.last(), Some(Cell::Error(_))));
+        app.cells.push(Cell::Assistant("```\ncode here\n```".into()));
+        app.open_code();
+        assert!(matches!(app.overlay, Some(Overlay::Code { selected: 0 })));
+        app.move_code_selection(3); // wraps around with a single block
+        assert!(matches!(app.overlay, Some(Overlay::Code { selected: 0 })));
     }
 
     #[test]

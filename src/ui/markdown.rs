@@ -13,14 +13,18 @@ pub fn render(src: &str, width: usize) -> Vec<Line<'static>> {
     for raw in src.lines() {
         let line = raw.trim_end();
 
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
+        if let Some(info) = line.trim_start().strip_prefix("```") {
+            if in_code {
+                in_code = false;
+                out.push(code_footer(width));
+            } else {
+                in_code = true;
+                out.push(code_header(info, width));
+            }
             continue;
         }
         if in_code {
-            let shade = Style::new().bg(Color::DarkGray);
-            let content = vec![Span::styled(format!(" {line} "), shade)];
-            out.extend(wrap_styled(content, width, Span::styled(" ", shade), Span::styled(" ", shade)));
+            out.extend(code_body(line, width));
             continue;
         }
         if line.trim().is_empty() {
@@ -116,6 +120,68 @@ pub fn render(src: &str, width: usize) -> Vec<Line<'static>> {
         ));
     }
     out
+}
+
+/// Top of a code box: `╭─ rust ─────────────── ctrl+g to copy ╮`.
+fn code_header(info: &str, width: usize) -> Line<'static> {
+    let inner = width.saturating_sub(2);
+    let label = info.trim().split_whitespace().next().unwrap_or("");
+    let label = if label.is_empty() { "code" } else { label };
+    let left = format!("─ {label} ");
+    let hint = " ctrl+g to copy ";
+    let mut spans = vec![Span::styled("╭", theme::dim())];
+    if left.len() + hint.len() + 1 <= inner {
+        let rule = inner - left.len() - hint.len();
+        spans.push(Span::styled(left, Style::new().bold()));
+        spans.push(Span::styled("─".repeat(rule), theme::dim()));
+        spans.push(Span::styled(hint, theme::dim()));
+    } else if left.len() + 1 <= inner {
+        let rule = inner - left.len();
+        spans.push(Span::styled(left, Style::new().bold()));
+        spans.push(Span::styled("─".repeat(rule), theme::dim()));
+    } else {
+        spans.push(Span::styled("─".repeat(inner), theme::dim()));
+    }
+    spans.push(Span::styled("╮", theme::dim()));
+    Line::from(spans)
+}
+
+/// One code line inside the box: a shaded band padded to full width with dim
+/// side borders. Long lines wrap inside the band.
+fn code_body(line: &str, width: usize) -> Vec<Line<'static>> {
+    let shade = Style::new().bg(Color::DarkGray);
+    let inner = width.saturating_sub(2);
+    let band = inner.saturating_sub(2).max(1);
+    let rows = wrap_styled(
+        vec![Span::styled(line.to_string(), shade)],
+        band.saturating_sub(1).max(1),
+        Span::raw(""),
+        Span::raw(""),
+    );
+    rows.into_iter()
+        .map(|row| {
+            let used = theme::line_width(&row);
+            let pad = band.saturating_sub(1 + used);
+            let mut spans = vec![
+                Span::styled("│", theme::dim()),
+                Span::styled(" ", shade),
+            ];
+            spans.extend(row.spans);
+            spans.push(Span::styled(" ".repeat(pad), shade));
+            spans.push(Span::styled("│", theme::dim()));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Bottom of a code box: `╰─────────────────────╯`.
+fn code_footer(width: usize) -> Line<'static> {
+    let inner = width.saturating_sub(2);
+    Line::from(vec![
+        Span::styled("╰", theme::dim()),
+        Span::styled("─".repeat(inner), theme::dim()),
+        Span::styled("╯", theme::dim()),
+    ])
 }
 
 /// Recognize `12.` / `3)` markers, returning the byte length of the marker.
@@ -256,6 +322,26 @@ mod tests {
         assert_eq!(text[0], "Title");
         assert!(text.iter().any(|l| l.contains("let x = 1;")));
         assert_eq!(text.last().unwrap(), "done");
+    }
+
+    #[test]
+    fn code_blocks_get_header_and_border() {
+        let lines = render("```rust\nlet x = 1;\n```", 40);
+        let text = plain(&lines);
+        assert!(text[0].starts_with('╭'));
+        assert!(text[0].contains("rust"));
+        assert!(text.iter().any(|l| l.contains('│') && l.contains("let x = 1;")));
+        assert!(text.last().unwrap().starts_with('╰'));
+    }
+
+    #[test]
+    fn multiple_code_blocks_each_get_a_box() {
+        let lines = render("```a\n1\n```\ntext\n```\n2\n```", 40);
+        let text = plain(&lines);
+        let headers = text.iter().filter(|l| l.starts_with('╭')).count();
+        let footers = text.iter().filter(|l| l.starts_with('╰')).count();
+        assert_eq!(headers, 2);
+        assert_eq!(footers, 2);
     }
 
     #[test]
