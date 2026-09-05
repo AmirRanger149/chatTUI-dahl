@@ -172,6 +172,24 @@ pub fn human_tokens(value: usize) -> String {
     }
 }
 
+/// Rough token estimate, not a real tokenizer.
+///
+/// ASCII is counted at about 4 characters per token; other scripts
+/// (Persian, Arabic, CJK, emoji) at about 1 character per token. Always
+/// present this as an estimate in the UI.
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut other = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            other += 1;
+        }
+    }
+    (ascii + 3) / 4 + other
+}
+
 /// Abbreviate `$HOME` to `~` and center-truncate long paths.
 pub fn display_path(path: &str, max_width: usize) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -186,9 +204,16 @@ pub fn display_path(path: &str, max_width: usize) -> String {
     if shortened.width() <= max_width {
         return shortened;
     }
-    let head = max_width / 2 - 1;
-    let tail = max_width - head - 2;
+    if max_width <= 1 {
+        return "…".to_string();
+    }
     let chars: Vec<char> = shortened.chars().collect();
+    let remaining = max_width.saturating_sub(1); // room for the ellipsis
+    let head = remaining / 2;
+    let tail = remaining.saturating_sub(head);
+    if head == 0 || tail == 0 || chars.len() < head + tail {
+        return "…".to_string();
+    }
     format!(
         "{}…{}",
         chars[..head].iter().collect::<String>(),
@@ -248,5 +273,25 @@ mod tests {
         std::env::set_var("HOME", "/home/dev");
         let path = display_path("/home/dev/projects/thing", 100);
         assert_eq!(path, "~/projects/thing");
+    }
+
+    #[test]
+    fn display_path_does_not_panic_on_tiny_widths() {
+        let path = "/home/dev/projects/thing";
+        for width in 0..8 {
+            let _ = display_path(path, width);
+        }
+        assert_eq!(display_path(path, 0), "");
+        assert_eq!(display_path(path, 1), "…");
+    }
+
+    #[test]
+    fn token_estimate_is_script_aware() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("سلام"), 4);
+        assert_eq!(estimate_tokens("你好"), 2);
+        assert!(estimate_tokens("🙂") >= 1);
+        assert!(estimate_tokens(r#"{"a":1}"#) < estimate_tokens("你好世界你好世界"));
     }
 }

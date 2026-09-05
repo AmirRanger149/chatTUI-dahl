@@ -24,10 +24,11 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     let sessions = SessionManager::load()?;
     let mut app = App::new(config, sessions);
+    install_panic_hook();
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, &mut app).await;
-    restore_terminal(&mut terminal)?;
-    result
+    let restore = restore_terminal(&mut terminal);
+    result.and(restore)
 }
 
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -147,6 +148,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.backspace();
             app.on_composer_changed();
         }
+        KeyCode::Delete => {
+            app.delete_forward();
+            app.on_composer_changed();
+        }
         KeyCode::Up if app.slash_open() => app.slash_up(),
         KeyCode::Down if app.slash_open() => app.slash_down(),
         KeyCode::Up => app.recall_prev(),
@@ -179,13 +184,48 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
+    if let Err(error) = execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste) {
+        let _ = disable_raw_mode();
+        return Err(error.into());
+    }
+    match Terminal::new(CrosstermBackend::new(stdout())) {
+        Ok(terminal) => Ok(terminal),
+        Err(error) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                stdout(),
+                LeaveAlternateScreen,
+                event::DisableBracketedPaste
+            );
+            Err(error.into())
+        }
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, event::DisableBracketedPaste)?;
-    terminal.show_cursor()?;
+    let raw = disable_raw_mode();
+    let leave = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        event::DisableBracketedPaste
+    );
+    let cursor = terminal.show_cursor();
+    raw?;
+    leave?;
+    cursor?;
     Ok(())
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            stdout(),
+            LeaveAlternateScreen,
+            event::DisableBracketedPaste,
+            crossterm::cursor::Show
+        );
+        previous(info);
+    }));
 }

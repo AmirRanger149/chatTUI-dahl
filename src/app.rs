@@ -162,9 +162,13 @@ impl App {
             return;
         };
         if selected != self.sessions.current_index() {
-            self.sessions.select(selected);
+            if self.streaming {
+                self.interrupt();
+            }
+            let result = self.sessions.select(selected);
             self.rebuild_cells();
             self.scroll_from_bottom = 0;
+            self.report_persist(result);
         }
         self.overlay = None;
     }
@@ -174,18 +178,23 @@ impl App {
             return;
         };
         if self.sessions.len() <= 1 {
+            self.push_error("cannot delete the only conversation".into());
             return;
         }
         let was_current = selected == self.sessions.current_index();
-        self.sessions.delete_at(selected);
+        if was_current && self.streaming {
+            self.interrupt();
+        }
+        let result = self.sessions.delete_at(selected);
         let len = self.sessions.len();
         if let Some(Overlay::History { selected }) = &mut self.overlay {
-            *selected = (*selected).min(len - 1);
+            *selected = (*selected).min(len.saturating_sub(1));
         }
         if was_current {
             self.rebuild_cells();
             self.scroll_from_bottom = 0;
         }
+        self.report_persist(result);
     }
 
     // -- code blocks -----------------------------------------------------------
@@ -314,6 +323,15 @@ impl App {
         self.cursor = prev;
     }
 
+    /// Delete: remove the character at the cursor.
+    pub fn delete_forward(&mut self) {
+        self.clamp_cursor();
+        if let Some(ch) = self.composer[self.cursor..].chars().next() {
+            let end = self.cursor + ch.len_utf8();
+            self.composer.replace_range(self.cursor..end, "");
+        }
+    }
+
     /// Move the cursor one letter to the left.
     pub fn move_cursor_left(&mut self) {
         self.clamp_cursor();
@@ -400,7 +418,7 @@ impl App {
 
     pub fn paste(&mut self, text: &str) {
         self.clamp_cursor();
-        let cleaned = text.replace("\r\n", "\n");
+        let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
         self.composer.insert_str(self.cursor, &cleaned);
         self.cursor += cleaned.len();
         self.on_composer_changed();
@@ -521,7 +539,7 @@ impl App {
         }
         self.prompt_history.push(text.clone());
         self.cells.push(Cell::User(text.clone()));
-        self.sessions.add_message("user", text);
+        self.report_persist(self.sessions.add_message("user", text));
         if let Err(error) = self.start_stream() {
             self.push_error(error.to_string());
         }
@@ -554,9 +572,13 @@ impl App {
             self.push_notice("already in a new conversation".into());
             return;
         }
-        self.sessions.new_session();
+        if self.streaming {
+            self.interrupt();
+        }
+        let result = self.sessions.new_session();
         self.rebuild_cells();
         self.scroll_from_bottom = 0;
+        self.report_persist(result);
     }
 
     // -- quit flow --------------------------------------------------------------
@@ -650,7 +672,7 @@ impl App {
         if !self.response.is_empty() {
             let text = std::mem::take(&mut self.response);
             self.cells.push(Cell::Assistant(text.clone()));
-            self.sessions.add_message("assistant", text);
+            self.report_persist(self.sessions.add_message("assistant", text));
         }
     }
 
@@ -662,14 +684,24 @@ impl App {
         self.cells.push(Cell::Notice(message));
     }
 
+    fn report_persist(&mut self, result: Result<()>) {
+        if let Err(error) = result {
+            self.push_error(format!("failed to save session: {error}"));
+        }
+    }
+
     /// Right-hand footer summary, codex-style context indicator.
     pub fn context_summary(&self) -> String {
         let session = self.sessions.current();
         let messages = session.messages.len();
-        let chars: usize = session.messages.iter().map(|m| m.content.len()).sum();
+        let tokens: usize = session
+            .messages
+            .iter()
+            .map(|message| crate::ui::theme::estimate_tokens(&message.content))
+            .sum();
         format!(
-            "{messages} msgs · ~{} tok",
-            crate::ui::theme::human_tokens(chars / 4)
+            "{messages} msgs · ~{} tok est.",
+            crate::ui::theme::human_tokens(tokens)
         )
     }
 }
@@ -806,6 +838,42 @@ mod tests {
     }
 
     #[test]
+    fn unicode_backspace_and_delete_stay_on_char_boundaries() {
+        let mut app = test_app();
+        app.set_composer_text("سلام🙂".into());
+        assert!(app.composer.is_char_boundary(app.cursor));
+        app.backspace();
+        assert_eq!(app.composer, "سلام");
+        assert!(app.composer.is_char_boundary(app.cursor));
+        app.move_cursor_home();
+        app.delete_forward();
+        assert_eq!(app.composer, "لام");
+        assert!(app.composer.is_char_boundary(app.cursor));
+        app.insert_char('خ');
+        assert_eq!(app.composer, "خلام");
+        app.paste("\rline\r\n");
+        assert_eq!(app.composer, "خ\nline\nلام");
+    }
+
+    #[test]
+    fn context_summary_is_labeled_as_an_estimate() {
+        let mut app = test_app();
+        app.sessions.add_message("user", "hello world").unwrap();
+        let summary = app.context_summary();
+        assert!(summary.contains("est."), "{summary}");
+        assert!(summary.contains("msgs"), "{summary}");
+    }
+
+    #[test]
+    fn cannot_delete_the_only_session_from_overlay() {
+        let mut app = test_app();
+        app.open_history();
+        app.delete_selected_session();
+        assert_eq!(app.sessions.len(), 1);
+        assert!(matches!(app.cells.last(), Some(Cell::Error(_))));
+    }
+
+    #[test]
     fn code_blocks_are_collected_from_assistant_messages() {
         let mut app = test_app();
         app.cells.push(Cell::Assistant(
@@ -836,8 +904,8 @@ mod tests {
     #[test]
     fn history_overlay_moves_and_clamps() {
         let mut app = test_app();
-        app.sessions.new_session();
-        app.sessions.new_session();
+        app.sessions.new_session().unwrap();
+        app.sessions.new_session().unwrap();
         app.open_history();
         app.move_history_selection(5);
         if let Some(Overlay::History { selected }) = app.overlay {

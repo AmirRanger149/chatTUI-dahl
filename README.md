@@ -1,32 +1,27 @@
 # chatTUI
 
-`chatTUI` is a small, fast terminal chat client for OpenAI-compatible APIs. It is built
-in Rust and designed for people who prefer a focused keyboard workflow over a
-browser window.
+chatTUI is a terminal chat client for OpenAI-compatible APIs, with a default
+endpoint of [Dahl Inference](https://inference.dahl.global/). It is a single
+Rust binary built with `ratatui`, `crossterm`, `tokio`, and `reqwest`.
 
-The app uses `ratatui` for the interface, `crossterm` for terminal input,
-`tokio` for asynchronous work, and `reqwest` for native OpenAI-compatible SSE streaming.
+The composer is always active. There are no Vim modes.
 
-## What You Get
+## Features
 
-- Live responses as the selected model generates them
-- Vim-style `NORMAL` and `INSERT` modes
-- Scrollable conversation view
-- Local conversation history saved as JSON
-- History drawer for returning to previous chats
-- Configurable Dahl model, temperature, and API endpoint
-- Markdown-friendly response output with shaded code boxes
-- Copy any code block from a response to the clipboard (`ctrl+g` or `/code`)
-- A single native Rust binary with no Python or OpenAI SDK dependency
+- Streaming responses over OpenAI-compatible SSE (`POST /chat/completions`)
+- Markdown rendering with shaded fenced code blocks
+- Local conversation history stored as JSON
+- History overlay to switch or delete saved conversations
+- Copy a fenced code block to the clipboard
+- Slash commands and a keyboard-shortcuts overlay
+- Unicode-aware composer (cursor, backspace, delete, word jumps, paste)
+- Footer shows message count and an approximate token estimate
 
-## Before You Start
-
-You need:
+## Requirements
 
 - Rust and Cargo from [rustup.rs](https://rustup.rs/)
-- A Dahl API key from [Dahl Inference](https://inference.dahl.global/)
-
-Check your Rust installation:
+- A Dahl API key from [Dahl Inference](https://inference.dahl.global/), or a
+  key for another OpenAI-compatible endpoint
 
 ```bash
 rustc --version
@@ -35,56 +30,53 @@ cargo --version
 
 ## Install
 
-Clone the repository and enter the project directory:
-
 ```bash
-git clone https://github.com/AmirRanger149/chatTUI.git
-cd chatTUI
-```
-
-Build the optimized release binary:
-
-```bash
+git clone https://github.com/AmirRanger149/chatTUI-dahl.git
+cd chatTUI-dahl
 cargo build --release
 ```
 
-Or run directly while developing:
+The binary is `target/release/chat-tui`. During development:
 
 ```bash
 cargo run
 ```
 
-## Configure Your Dahl Key
+## Configuration
 
-### Environment variable
+Values are applied in this order:
 
-This is the quickest option:
+1. Built-in defaults
+2. `dahl.json`
+3. Environment variables, which override the file
 
-```bash
-export DAHL_API_KEY="your-key"
-cargo run --release
-```
-
-You can put the export in your shell profile if you use the app regularly.
-
-### `dahl.json`
-
-The app looks for `dahl.json` beside the compiled application first. When
-running with `cargo run`, it also checks the current working directory. Its
-contents can look like this:
+`dahl.json` is read from the directory that contains the compiled binary, then
+from the current working directory. The first file found is used.
 
 ```json
 {
   "api_key": "your-key",
+  "base_url": "https://inference.dahl.global/v1",
   "model": "MiniMaxAI/MiniMax-M2.7",
   "temperature": 0.7
 }
 ```
 
-The API key is read from this file so you do not need to enter it each time.
-Keep this file private and never commit it.
+Every field is optional. Missing fields keep their defaults:
 
-Environment variables take priority for the key-related values:
+| Field | Default |
+| --- | --- |
+| `api_key` | unset |
+| `base_url` | `https://inference.dahl.global/v1` |
+| `model` | `MiniMaxAI/MiniMax-M2.7` |
+| `temperature` | `0.7` |
+
+Keep `dahl.json` private. It is gitignored and should not be committed.
+
+### Environment variables
+
+These override the matching values from `dahl.json` when they are set and
+non-empty:
 
 ```text
 DAHL_API_KEY
@@ -92,92 +84,127 @@ DAHL_BASE_URL
 DAHL_MODEL
 ```
 
-### Example file
+Example:
 
-```json
-{
-  "api_key": "your-key",
-  "model": "MiniMaxAI/MiniMax-M2.7"
-}
+```bash
+export DAHL_API_KEY="your-key"
+export DAHL_MODEL="MiniMaxAI/MiniMax-M2.7"
+cargo run --release
 ```
 
+Invalid JSON or empty `model` / `base_url` values produce an error instead of
+falling back silently.
 
-## Using chatTUI
+The default base URL does not need to be present in the config file. Set
+`DAHL_BASE_URL` (or `base_url`) only for another OpenAI-compatible gateway.
+The endpoint must support `POST /chat/completions` with `stream: true`.
 
-The app starts in `NORMAL` mode. Press `i` to begin writing a prompt.
+Confirm available model IDs with the provider's `GET /v1/models` endpoint.
 
-### Normal mode
+## Usage
+
+Start typing in the composer and press Enter to send. Responses stream into
+the transcript as tokens arrive. A long generation is not killed by a short
+total timeout; the client times out only on connect failure or a stretch of
+inactivity.
+
+### Global keys
 
 | Key | Action |
 | --- | --- |
-| `i` | Enter Insert mode |
-| `j` or `Down` | Scroll down |
-| `k` or `Up` | Scroll up |
-| `h` | Toggle the history drawer |
-| `Shift+H` | Switch to the next saved conversation |
-| `n` | Start a new conversation |
-| `?` | Show a help hint |
-| `q` | Quit |
+| `Enter` | Send the prompt, or run a slash command |
+| `Shift+Enter` or `Alt+Enter` | Insert a newline |
+| `Esc` | Close overlay, interrupt a stream, or clear the composer |
+| `Ctrl+T` | Conversation history |
+| `Ctrl+G` | Browse and copy code blocks |
+| `PageUp` / `PageDown` | Scroll the transcript |
+| `?` (empty composer) | Keyboard shortcuts |
+| `Ctrl+C` twice | Quit |
 
-### Insert mode
+### Composer
 
 | Key | Action |
 | --- | --- |
-| Any character | Add it to the prompt |
-| `Enter` | Submit the prompt |
-| `Backspace` | Delete the previous character |
-| `Esc` | Return to Normal mode |
+| Left / Right | Move the cursor |
+| `Ctrl+Left` / `Ctrl+Right` | Jump by word |
+| `Alt+B` / `Alt+F` | Jump by word |
+| Home / End | Start / end of the prompt |
+| Backspace / Delete | Delete backward / forward |
+| `Ctrl+U` | Clear the composer |
+| Up / Down | Prompt history (or slash-command list) |
+| Tab | Accept the highlighted slash command |
 
-## Models And Endpoints
+### History overlay (`Ctrl+T` or `/history`)
 
-The default model is `MiniMaxAI/MiniMax-M2.7`. Change it with `DAHL_MODEL` or
-the `model` value in your config file. The model name must be available through
-Dahl; retrieve current model IDs from its `GET /v1/models` endpoint.
+| Key | Action |
+| --- | --- |
+| Up / Down | Select a conversation |
+| PageUp / PageDown | Move by a page |
+| Enter | Open the selected conversation |
+| `d` | Delete the selected conversation (the last one cannot be deleted) |
+| Esc | Close |
 
-The client uses this endpoint internally by default, so it does not need to be
-present in `config.json`:
+### Code overlay (`Ctrl+G` or `/code`)
+
+| Key | Action |
+| --- | --- |
+| Up / Down | Select a fenced code block |
+| Enter | Copy it to the clipboard |
+| Esc | Close |
+
+Clipboard copy prefers a system utility (`pbcopy`, `wl-copy`, `xclip`, `xsel`,
+or `clip`) and falls back to OSC 52.
+
+### Slash commands
+
+| Command | Action |
+| --- | --- |
+| `/help` | Show keyboard shortcuts |
+| `/new` | Start a new conversation |
+| `/history` | Open the history overlay |
+| `/code` | Open the code-block overlay |
+| `/model <model-id>` | Switch the model for later requests |
+| `/quit` | Exit |
+
+## Sessions
+
+Conversations are stored as JSON in the platform data directory for `chat-tui`:
 
 ```text
-https://inference.dahl.global/v1
+Linux:   ~/.local/share/chat-tui/sessions.json
+macOS:   ~/Library/Application Support/chat-tui/sessions.json
+Windows: %APPDATA%\chatTUI\chat-tui\sessions.json
 ```
 
-You may set `DAHL_BASE_URL` for another OpenAI-compatible gateway or proxy. The
-endpoint must support:
+If `XDG_DATA_HOME` is set on Linux, that location is used instead. A write
+failure is shown in the transcript; the in-memory conversation is kept. If the
+session file is missing, a new empty conversation is created. If it is
+corrupted, startup fails with the file path so the file can be moved or
+deleted without being overwritten.
 
-```text
-POST /chat/completions
-```
-
-## Saved Data
-
-Conversation history is stored in the platform data directory, normally:
-
-```text
-~/.local/share/chatTUI/chat-tui/sessions.json
-```
-
-The history file contains your saved messages. Back it up if you need to keep
-your conversations, and protect it if they contain private information.
+The footer token figure is an estimate (`tok est.`), not an exact tokenizer
+count.
 
 ## Troubleshooting
 
 **The app says the API key is missing**
 
-Set `DAHL_API_KEY` or create the JSON configuration file in the location
-above.
+Set `DAHL_API_KEY` or put `api_key` in `dahl.json`.
 
 **The model is rejected**
 
-Check the spelling and confirm that the model is available through `GET /v1/models`.
+Check the spelling and confirm that the model is available through
+`GET /v1/models`. Switch with `/model <model-id>` or `DAHL_MODEL`.
 
-**The request fails or times out**
+**The request fails**
 
-Check your network connection, API quota, endpoint URL, and API key. A proxy
-must support OpenAI-compatible streaming responses.
+HTTP errors include the status and, when the API returns one, the server
+message (400, 401, 403, 404, 429, 5xx). Check the key, model, base URL, and
+quota. A proxy must support OpenAI-compatible streaming responses.
 
 **A key was exposed**
 
-Revoke it in Dahl and create a replacement.
+Revoke it with the provider and create a replacement.
 
 ## License
 

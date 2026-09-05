@@ -27,11 +27,18 @@ pub fn row_count(app: &App, width: u16) -> u16 {
 }
 
 /// Wrap the composer text and locate the cursor inside the wrapped rows.
+fn clamped_cursor(text: &str, cursor: usize) -> usize {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        text.len()
+    } else {
+        cursor
+    }
+}
+
 fn layout(app: &App, width: usize) -> Layout {
     let limit = width.saturating_sub(PREFIX_W).max(1);
-    let cursor_char = app.composer[..app.cursor.min(app.composer.len())]
-        .chars()
-        .count();
+    let cursor = clamped_cursor(&app.composer, app.cursor);
+    let cursor_char = app.composer[..cursor].chars().count();
 
     let mut rows: Vec<String> = Vec::new();
     let mut cursor_row = 0usize;
@@ -96,11 +103,11 @@ fn wrap_rows(text: &str, limit: usize) -> Vec<String> {
     loop {
         // One token: leading whitespace plus the word that follows it.
         let mut token = String::new();
-        while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
-            token.push(chars.next().unwrap());
+        while let Some(ch) = chars.next_if(|ch| ch.is_whitespace()) {
+            token.push(ch);
         }
-        while matches!(chars.peek(), Some(ch) if !ch.is_whitespace()) {
-            token.push(chars.next().unwrap());
+        while let Some(ch) = chars.next_if(|ch| !ch.is_whitespace()) {
+            token.push(ch);
         }
         if token.is_empty() {
             break;
@@ -275,4 +282,42 @@ pub fn slash_popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         })
         .collect();
     theme::with_border(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::session::manager::SessionManager;
+
+    fn app_with(text: &str, cursor: usize) -> App {
+        let mut app = App::new(Config::default(), SessionManager::for_tests());
+        app.composer = text.to_string();
+        app.cursor = cursor;
+        app
+    }
+
+    #[test]
+    fn wrap_concatenates_back_to_original() {
+        for text in ["", "hello", "سلام دنیا", "🙂🙂🙂", "a very_long_token_without_spaces"] {
+            assert_eq!(wrap_rows(text, 4).concat(), text);
+        }
+    }
+
+    #[test]
+    fn layout_survives_a_mid_character_cursor() {
+        let app = app_with("é", 1); // byte 1 is not a char boundary
+        let layout = layout(&app, 40);
+        assert_eq!(layout.rows.concat(), "é");
+        assert!(layout.cursor_col >= PREFIX_W);
+    }
+
+    #[test]
+    fn layout_places_cursor_on_persian_text() {
+        let text = "سلام";
+        let app = app_with(text, text.len());
+        let layout = layout(&app, 40);
+        assert_eq!(layout.rows.concat(), text);
+        assert_eq!(layout.cursor_row, 0);
+    }
 }
