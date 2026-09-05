@@ -539,7 +539,8 @@ impl App {
         }
         self.prompt_history.push(text.clone());
         self.cells.push(Cell::User(text.clone()));
-        self.report_persist(self.sessions.add_message("user", text));
+        let persist = self.sessions.add_message("user", text);
+        self.report_persist(persist);
         if let Err(error) = self.start_stream() {
             self.push_error(error.to_string());
         }
@@ -626,7 +627,7 @@ impl App {
             .collect();
         let model = self.config.model.clone();
         let temperature = self.config.temperature;
-        let client = ApiClient::new(api_key, self.config.base_url.clone());
+        let client = ApiClient::new(api_key, self.config.base_url.clone())?;
         tokio::spawn(async move {
             if let Err(error) = client
                 .stream_chat(&messages, &model, temperature, tx.clone())
@@ -672,7 +673,8 @@ impl App {
         if !self.response.is_empty() {
             let text = std::mem::take(&mut self.response);
             self.cells.push(Cell::Assistant(text.clone()));
-            self.report_persist(self.sessions.add_message("assistant", text));
+            let persist = self.sessions.add_message("assistant", text);
+            self.report_persist(persist);
         }
     }
 
