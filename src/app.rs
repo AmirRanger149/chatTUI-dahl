@@ -61,6 +61,8 @@ pub struct App {
     pub scroll_from_bottom: u16,
     pub overlay: Option<Overlay>,
     pub slash_selected: usize,
+    /// Keep finished `<think>` reasoning blocks expanded in the transcript.
+    pub show_thinking: bool,
     pub quit_primed_at: Option<Instant>,
     pub should_quit: bool,
 }
@@ -82,6 +84,7 @@ impl App {
             scroll_from_bottom: 0,
             overlay: None,
             slash_selected: 0,
+            show_thinking: false,
             quit_primed_at: None,
             should_quit: false,
         };
@@ -123,6 +126,21 @@ impl App {
         self.streaming = false;
         self.stream_started = None;
         self.finish_partial();
+    }
+
+    /// `ctrl+r`: expand / collapse completed reasoning blocks.
+    pub fn toggle_thinking(&mut self) {
+        self.show_thinking = !self.show_thinking;
+    }
+
+    /// True while the model is streaming tokens inside a `<think>` block.
+    pub fn is_thinking(&self) -> bool {
+        self.streaming && crate::ui::thinking::is_thinking(&self.response)
+    }
+
+    /// The reasoning line currently being written, for the status row.
+    pub fn current_thought(&self) -> Option<String> {
+        crate::ui::thinking::latest_thought(&self.response)
     }
 
     pub fn toggle_shortcuts(&mut self) {
@@ -600,7 +618,9 @@ impl App {
             .current()
             .messages
             .iter()
-            .map(|m| (m.role.clone(), m.content.clone()))
+            // Reasoning is private to the turn that produced it — never replay
+            // `<think>` blocks back to the model.
+            .map(|m| (m.role.clone(), crate::ui::thinking::strip(&m.content)))
             .collect();
         let model = self.config.model.clone();
         let temperature = self.config.temperature;
@@ -648,7 +668,12 @@ impl App {
     /// Commit an in-flight assistant response (used on completion and interrupt).
     fn finish_partial(&mut self) {
         if !self.response.is_empty() {
-            let text = std::mem::take(&mut self.response);
+            let mut text = std::mem::take(&mut self.response);
+            // An interrupted stream can leave a dangling `<think>`; close it so
+            // the transcript shows a finished (collapsible) reasoning block.
+            if crate::ui::thinking::is_thinking(&text) {
+                text.push_str(crate::ui::thinking::CLOSE_TAG);
+            }
             self.cells.push(Cell::Assistant(text.clone()));
             self.sessions.add_message("assistant", text);
         }

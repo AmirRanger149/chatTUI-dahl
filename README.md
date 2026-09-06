@@ -10,13 +10,15 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 ## What You Get
 
 - Live responses as the selected model generates them
-- Vim-style `NORMAL` and `INSERT` modes
+- An always-on composer with a `Working` / `Thinking` status row while streaming
 - Scrollable conversation view
 - Local conversation history saved as JSON
 - History drawer for returning to previous chats
 - Configurable Dahl model, temperature, and API endpoint
 - Markdown-friendly response output with shaded code boxes
 - Copy any code block from a response to the clipboard (`ctrl+g` or `/code`)
+- Animated reasoning view for thinking models such as `MiniMaxAI/MiniMax-M2.7`
+  (see [Reasoning Models](#reasoning-models))
 - A single native Rust binary with no Python or OpenAI SDK dependency
 
 ## Before You Start
@@ -104,33 +106,75 @@ DAHL_MODEL
 
 ## Using chatTUI
 
-The app starts in `NORMAL` mode. Press `i` to begin writing a prompt.
+The composer is always focused — just start typing and press `Enter` to send.
 
-### Normal mode
-
-| Key | Action |
-| --- | --- |
-| `i` | Enter Insert mode |
-| `j` or `Down` | Scroll down |
-| `k` or `Up` | Scroll up |
-| `h` | Toggle the history drawer |
-| `Shift+H` | Switch to the next saved conversation |
-| `n` | Start a new conversation |
-| `?` | Show a help hint |
-| `q` | Quit |
-
-### Insert mode
+### Keyboard
 
 | Key | Action |
 | --- | --- |
-| Any character | Add it to the prompt |
-| `Enter` | Submit the prompt |
-| `Backspace` | Delete the previous character |
-| `Esc` | Return to Normal mode |
+| `Enter` | Send the message |
+| `Shift+Enter` | Newline in the composer |
+| `Esc` | Close a popup, then interrupt a running stream, then clear the composer |
+| `Ctrl+T` | Conversation history |
+| `Ctrl+G` | Browse and copy code blocks |
+| `Ctrl+R` | Show / hide model reasoning |
+| `PgUp` / `PgDn` | Scroll the transcript |
+| `Up` / `Down` | Recall previous prompts |
+| `←` / `→` | Move the cursor (`Ctrl` jumps whole words) |
+| `Ctrl+U` | Clear the composer |
+| `?` | Keyboard shortcuts |
+| `Ctrl+C` ×2 | Quit |
+
+### Slash commands
+
+| Command | Action |
+| --- | --- |
+| `/help` | Show keyboard shortcuts |
+| `/new` | Start a new conversation |
+| `/history` | Browse saved conversations |
+| `/code` | Browse and copy code blocks |
+| `/model <id>` | Switch model |
+| `/quit` | Exit chatTUI |
+
+Type `/` to open the command palette, then `Tab` to complete.
+
+## Reasoning Models
+
+Some models expose their private chain of thought by wrapping it in
+`<think> … </think>` before the actual answer. `MiniMaxAI/MiniMax-M2.7` — the
+default model — is one of them. chatTUI understands that format and gives it
+its own animated treatment instead of dumping raw tags into the transcript.
+
+**While the model is thinking**, the status row above the composer turns into a
+shimmering indicator with a live preview of the thought being written:
+
+```text
+✻ Thinking (7s • esc to interrupt)  comparing the two approaches
+```
+
+The transcript shows the reasoning as a dim, italic block behind a `┃` rule,
+kept to the last few lines so it never pushes the answer off screen.
+
+**Once the answer starts**, the block collapses into a single quiet summary line:
+
+```text
+✻ Thought for 84 words  ▸ ctrl+r
+```
+
+Press `Ctrl+R` at any time to expand or collapse completed reasoning blocks.
+
+Notes:
+
+- Reasoning is never replayed back to the API on later turns, so it does not
+  consume context or confuse the model.
+- Interrupting a stream mid-thought (`Esc`) still leaves a tidy, collapsible block.
+- Models that do not emit `<think>` tags are unaffected — you get the usual
+  `• Working` indicator and plain markdown output.
 
 ## Models And Endpoints
 
-The default model is `MiniMaxAI/MiniMax-M2.7`. Change it with `DAHL_MODEL` or
+The default model is `MiniMaxAI/MiniMax-M2.7`, a reasoning model — see
+[Reasoning Models](#reasoning-models). Change it with `DAHL_MODEL` or
 the `model` value in your config file. The model name must be available through
 Dahl; retrieve current model IDs from its `GET /v1/models` endpoint.
 

@@ -16,11 +16,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
 }
 
 fn shortcuts(frame: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 9] = [
+    let rows: [(&str, &str); 10] = [
         ("enter", "send message"),
         ("esc", "close popup · interrupt stream"),
         ("ctrl+t", "conversation history"),
         ("ctrl+g", "copy code blocks"),
+        ("ctrl+r", "show / hide model reasoning"),
         ("pgup / pgdn", "scroll transcript"),
         ("up / down", "prompt history"),
         ("← / →", "move cursor · ctrl jumps words"),

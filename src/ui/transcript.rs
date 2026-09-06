@@ -3,7 +3,7 @@
 //! the bottom with manual scrollback.
 
 use crate::app::{App, Cell};
-use crate::ui::{markdown, theme};
+use crate::ui::{markdown, theme, thinking};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use std::env;
@@ -16,11 +16,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
 
     for cell in &app.cells {
-        lines.extend(cell_lines(cell, width));
+        lines.extend(cell_lines(cell, width, app));
         lines.push(Line::from(""));
     }
     if !app.response.is_empty() {
-        lines.extend(markdown::render(&app.response, width));
+        lines.extend(assistant_lines(&app.response, width, app));
         lines.push(Line::from(""));
     }
 
@@ -68,7 +68,32 @@ fn current_dir() -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
-fn cell_lines(cell: &Cell, width: usize) -> Vec<Line<'static>> {
+/// Assistant output, with any `<think> … </think>` reasoning peeled off into
+/// its own animated / collapsible cell above the answer.
+fn assistant_lines(text: &str, width: usize, app: &App) -> Vec<Line<'static>> {
+    let segments = thinking::split(text);
+    if !segments.iter().any(|segment| segment.thinking) {
+        return markdown::render(text, width);
+    }
+    let mut lines = Vec::new();
+    for segment in segments {
+        if segment.thinking {
+            lines.extend(thinking::render_segment(
+                &segment.text,
+                width,
+                segment.open,
+                app.show_thinking,
+                app.elapsed_ms(),
+            ));
+            lines.push(Line::from(""));
+        } else if !segment.text.trim().is_empty() {
+            lines.extend(markdown::render(segment.text.trim_start_matches('\n'), width));
+        }
+    }
+    lines
+}
+
+fn cell_lines(cell: &Cell, width: usize, app: &App) -> Vec<Line<'static>> {
     match cell {
         Cell::User(text) => theme::wrap_styled(
             vec![Span::raw(theme::clamp_text(text, 2000))],
@@ -76,7 +101,7 @@ fn cell_lines(cell: &Cell, width: usize) -> Vec<Line<'static>> {
             theme::user_prefix(),
             Span::raw("  "),
         ),
-        Cell::Assistant(text) => markdown::render(text, width),
+        Cell::Assistant(text) => assistant_lines(text, width, app),
         Cell::Error(text) => {
             let style = Style::new().fg(theme::ERROR_COLOR);
             theme::wrap_styled(
