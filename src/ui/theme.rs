@@ -2,6 +2,7 @@
 //! spinner glyphs, and small formatting helpers shared across the UI.
 
 use ratatui::prelude::*;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub const ACCENT: Color = Color::Cyan;
@@ -21,12 +22,26 @@ pub fn user_prefix() -> Span<'static> {
     Span::styled("› ", Style::new().bold().dim())
 }
 
+/// Visible width of `text` in terminal cells, measured exactly the way
+/// ratatui lays out buffer cells: per-grapheme widths.
+///
+/// Whole-string `UnicodeWidthStr::width` must not be used for UI geometry:
+/// unicode-width 0.2 applies multi-character ligature rules (notably Arabic
+/// Lam-Alef `لا`, which appears all over Persian text) that collapse a whole
+/// sequence to a single cell. Ratatui packs cells per grapheme — and real
+/// terminals render the ligature across two cells — so whole-string widths
+/// undercount, padded rows overflow their area, and ratatui clips the
+/// trailing border (most visibly in the code overlay).
+pub fn cell_width(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
 pub fn line_width(line: &Line<'_>) -> usize {
-    line.spans.iter().map(|span| span.content.width()).sum()
+    line.spans.iter().map(|span| cell_width(&span.content)).sum()
 }
 
 pub fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.width()).sum()
+    spans.iter().map(|span| cell_width(&span.content)).sum()
 }
 
 /// Render `lines` inside a dim rounded border that hugs the widest line —
@@ -60,8 +75,8 @@ pub fn wrap_styled(
 ) -> Vec<Line<'static>> {
     let width = width.max(8);
     let words = tokenize(spans);
-    let first_w = first_prefix.content.width();
-    let cont_w = cont_prefix.content.width();
+    let first_w = cell_width(&first_prefix.content);
+    let cont_w = cell_width(&cont_prefix.content);
 
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
@@ -72,7 +87,7 @@ pub fn wrap_styled(
         loop {
             let prefix_w = if first_row { first_w } else { cont_w };
             let limit = width.saturating_sub(prefix_w);
-            let word_w = word.width();
+            let word_w = cell_width(&word);
             if used + word_w <= limit {
                 if word_w > 0 {
                     current.push(Span::styled(word, style));
@@ -84,7 +99,7 @@ pub fn wrap_styled(
                 // A single word longer than the line: hard-split it.
                 let mut take: String = word.chars().take(limit).collect();
                 let rest: String = word.chars().skip(limit).collect();
-                let rest_width = rest.width();
+                let rest_width = cell_width(&rest);
                 take.push_str(&" ".repeat(limit.saturating_sub(word_w.min(limit))));
                 current.push(Span::styled(take, style));
                 rows.push(std::mem::take(&mut current));
@@ -183,7 +198,7 @@ pub fn display_path(path: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    if shortened.width() <= max_width {
+    if cell_width(&shortened) <= max_width {
         return shortened;
     }
     let head = max_width / 2 - 1;
@@ -248,5 +263,16 @@ mod tests {
         std::env::set_var("HOME", "/home/dev");
         let path = display_path("/home/dev/projects/thing", 100);
         assert_eq!(path, "~/projects/thing");
+    }
+
+    #[test]
+    fn cell_width_counts_persian_like_the_terminal() {
+        // سلام contains Lam-Alef (لا): whole-string width() collapses it to
+        // one cell, but terminals and ratatui's per-grapheme layout use two.
+        assert_eq!(cell_width("لا"), 2);
+        assert_eq!(cell_width("سلام"), 4);
+        assert_eq!(cell_width("سلام دنیا"), 9);
+        // ZWNJ (نیم‌فاصله) is zero-width and must not disturb measurement.
+        assert_eq!(cell_width("می‌شود"), 5);
     }
 }

@@ -4,7 +4,6 @@
 
 use crate::ui::theme::{self, wrap_styled};
 use ratatui::prelude::*;
-use unicode_width::UnicodeWidthStr;
 
 pub fn render(src: &str, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -101,7 +100,7 @@ pub fn render(src: &str, width: usize) -> Vec<Line<'static>> {
             let marker = trimmed[..marker_end].to_string();
             let content = trimmed[marker_end..].trim_start();
             let spans = inline(content, Style::new());
-            let cont = " ".repeat(indent.min(8) + marker.width() + 1);
+            let cont = " ".repeat(indent.min(8) + theme::cell_width(&marker) + 1);
             out.extend(wrap_styled(
                 spans,
                 width,

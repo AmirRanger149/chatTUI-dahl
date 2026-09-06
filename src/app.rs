@@ -267,9 +267,22 @@ impl App {
         };
         let line_count = block.code.lines().count();
         match crate::clipboard::copy(&block.code) {
-            Ok(method) => self.push_notice(format!(
-                "copied {lang} block ({line_count} lines) via {method}"
+            Ok(outcome) if outcome.verified => self.push_notice(format!(
+                "copied {lang} block ({line_count} lines) via {}",
+                outcome.method
             )),
+            Ok(outcome) => {
+                // Best-effort OSC 52 path: the terminal may have ignored it,
+                // so say "sent" instead of "copied" and point at the fix.
+                let mut message = format!(
+                    "sent {lang} block ({line_count} lines) via {} — paste to confirm",
+                    outcome.method
+                );
+                if let Some(hint) = outcome.hint {
+                    message.push_str(&format!(" ({hint})"));
+                }
+                self.push_notice(message);
+            }
             Err(error) => self.push_error(format!("clipboard failed: {error}")),
         }
         self.overlay = None;

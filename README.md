@@ -138,6 +138,16 @@ The composer is always focused — just start typing and press `Enter` to send.
 
 Type `/` to open the command palette, then `Tab` to complete.
 
+### Clipboard
+
+`ctrl+g` / `/code` copies through your system clipboard when a clipboard tool
+is available — `pbcopy` on macOS, `clip` on Windows, `wl-copy` / `xclip` /
+`xsel` on Linux — so the copy is verified. Otherwise chatTUI falls back to the
+terminal's OSC 52 sequence (with tmux/screen passthrough, and automatically
+over SSH), which is best-effort: if pasting comes up empty, install `wl-copy`
+(Wayland) or `xclip` (X11), or enable OSC 52 clipboard support in your
+terminal.
+
 ## Reasoning Models
 
 Some models expose their private chain of thought by wrapping it in
