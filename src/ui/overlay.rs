@@ -6,6 +6,7 @@ use crate::app::{App, Overlay};
 use crate::ui::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
     match overlay {
@@ -128,14 +129,7 @@ fn code(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
             block.lang.as_str()
         };
         let line_count = block.code.lines().count();
-        let preview: String = block
-            .code
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(48)
-            .collect();
+        let preview = preview_text(&block.code);
         let label = format!(
             "{marker}{:>2} · {lang} · {line_count} lines · {preview}",
             index + 1
@@ -151,6 +145,35 @@ fn code(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
         lines.push(line);
     }
     render_card(frame, area, lines);
+}
+
+/// Maximum preview width in the code list, in terminal cells.
+const PREVIEW_WIDTH: usize = 48;
+
+/// First line of a code block, sanitized for single-line display in the code
+/// list: tabs become spaces (a raw tab would jump to the terminal's next tab
+/// stop and blow past the card edge), other control characters become `�`,
+/// and the line is capped at [`PREVIEW_WIDTH`] cells without splitting
+/// graphemes. Persian/Arabic text — including ZWNJ — passes through
+/// untouched; only layout-breaking characters are replaced.
+fn preview_text(code: &str) -> String {
+    let line = code.lines().next().unwrap_or("");
+    let mut out = String::new();
+    let mut used = 0usize;
+    for grapheme in line.graphemes(true) {
+        let shown = match grapheme {
+            "\t" => "  ",
+            g if g.chars().all(|ch| !ch.is_control()) => g,
+            _ => "�",
+        };
+        let width = theme::cell_width(shown);
+        if used + width > PREVIEW_WIDTH {
+            break;
+        }
+        out.push_str(shown);
+        used += width;
+    }
+    out
 }
 
 /// Center a dim rounded card around `lines` and render it.
@@ -174,9 +197,96 @@ fn render_card(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
         width: width as u16,
         height: height as u16,
     };
-    // Erase everything underneath the card first. Without this, content drawn
-    // behind the popup — especially shaded code blocks in the transcript —
-    // bleeds into the card and the two layers visually fight each other.
-    frame.render_widget(Clear, rect);
+    // Erase the card's rows across the full screen width first. Without this,
+    // content drawn behind the popup — especially shaded code blocks in the
+    // transcript — bleeds into the card and the two layers visually fight each
+    // other. Clearing full rows (rather than just the card rect) additionally
+    // keeps terminal bidirectional text away from the card: if RTL transcript
+    // text remained on the same rows, bidi-capable terminals would reorder the
+    // card together with the background and the two would visibly interfere.
+    let scrim = Rect {
+        x: area.x,
+        y: rect.y,
+        width: area.width,
+        height: rect.height,
+    };
+    frame.render_widget(Clear, scrim);
     frame.render_widget(Paragraph::new(bordered), rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Cell;
+    use crate::config::Config;
+    use crate::session::manager::SessionManager;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn preview_sanitizes_layout_breaking_characters() {
+        assert_eq!(preview_text("\tindented"), "  indented");
+        assert_eq!(preview_text("ok\x07no"), "ok�no");
+        // Persian passes through untouched, including ZWNJ.
+        assert_eq!(preview_text("می‌شود سلام"), "می‌شود سلام");
+        assert_eq!(preview_text(""), "");
+        // Capped by cells, not chars.
+        assert!(theme::cell_width(&preview_text(&"x".repeat(100))) <= PREVIEW_WIDTH);
+        assert_eq!(preview_text(&"x".repeat(100)).len(), PREVIEW_WIDTH);
+    }
+
+    #[test]
+    fn code_card_stays_aligned_with_persian_content() {
+        let mut app = App::new(Config::default(), SessionManager::for_tests());
+        app.cells.push(Cell::Assistant(
+            concat!(
+                "این یک پاسخ فارسی است\n",
+                "```python\n",
+                "print(\"سلام دنیا\")\n",
+                "# توضیح فارسی\n",
+                "```\n",
+                "متن پایانی",
+            )
+            .into(),
+        ));
+        app.open_code();
+        assert!(matches!(app.overlay, Some(crate::app::Overlay::Code { .. })));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // The overlay card is the only centered (x > 0) bordered box: the
+        // transcript's own boxes hug the left edge.
+        let mut top = None;
+        for y in 0..24u16 {
+            for x in 0..80u16 {
+                if buffer[(x, y)].symbol() == "╭" && x > 0 {
+                    top = Some((x, y));
+                }
+            }
+        }
+        let (x0, y0) = top.expect("code card top border should be visible");
+        let x1 = (x0..80)
+            .find(|x| buffer[(*x, y0)].symbol() == "╮")
+            .expect("code card top border should close");
+        let y1 = (y0 + 1..24)
+            .find(|y| buffer[(x0, *y)].symbol() == "╰")
+            .expect("code card bottom border should be visible");
+        assert_eq!(buffer[(x1, y1)].symbol(), "╯");
+
+        // Every card row spans exactly the same columns with intact side
+        // borders, and no background text leaks onto the card's rows (the
+        // scrim keeps bidi-capable terminals from reordering the card with
+        // the Persian transcript behind it).
+        for y in y0 + 1..y1 {
+            assert_eq!(buffer[(x0, y)].symbol(), "│", "left border at row {y}");
+            assert_eq!(buffer[(x1, y)].symbol(), "│", "right border at row {y}");
+            for x in 0..x0 {
+                assert_eq!(buffer[(x, y)].symbol(), " ", "scrim gap at ({x}, {y})");
+            }
+            for x in x1 + 1..80 {
+                assert_eq!(buffer[(x, y)].symbol(), " ", "scrim gap at ({x}, {y})");
+            }
+        }
+    }
 }

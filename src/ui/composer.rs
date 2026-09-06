@@ -7,7 +7,7 @@ use crate::app::{App, MAX_COMPOSER_ROWS};
 use crate::ui::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 /// Display width of the `› ` / continuation prefix in front of every row.
 const PREFIX_W: usize = 2;
@@ -56,7 +56,7 @@ fn layout(app: &App, width: usize) -> Layout {
                         .map(|(i, _)| i)
                         .unwrap_or(row.len());
                     cursor_row = base + index;
-                    cursor_col = PREFIX_W + row[..byte].width();
+                    cursor_col = PREFIX_W + theme::cell_width(&row[..byte]);
                     found = true;
                     break;
                 }
@@ -65,12 +65,8 @@ fn layout(app: &App, width: usize) -> Layout {
             if !found {
                 // Cursor sits past the last wrapped row: pin to its end.
                 cursor_row = base + wrapped.len().saturating_sub(1);
-                cursor_col = PREFIX_W
-                    + wrapped
-                        .last()
-                        .map(String::as_str)
-                        .unwrap_or("")
-                        .width();
+                let tail = wrapped.last().map(String::as_str).unwrap_or("");
+                cursor_col = PREFIX_W + theme::cell_width(tail);
                 found = true;
             }
         }
@@ -236,7 +232,7 @@ pub fn slash_popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let end = (start + max_rows).min(items.len());
     let shown = &items[start..end];
 
-    let name_w = shown.iter().map(|c| c.name.width()).max().unwrap_or(0);
+    let name_w = shown.iter().map(|c| theme::cell_width(c.name)).max().unwrap_or(0);
     let desc_limit = width.saturating_sub(name_w + 6).max(8);
 
     let mut rows: Vec<(String, bool)> = shown
@@ -253,12 +249,12 @@ pub fn slash_popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     // Equalize widths so the highlight bar spans the full popup.
     let row_w = rows
         .iter()
-        .map(|(text, _)| text.width())
+        .map(|(text, _)| theme::cell_width(text))
         .max()
         .unwrap_or(0)
         .min(width.saturating_sub(6));
     for (text, _) in &mut rows {
-        let pad = row_w.saturating_sub(text.width());
+        let pad = row_w.saturating_sub(theme::cell_width(text));
         text.push_str(&" ".repeat(pad));
     }
     let lines: Vec<Line<'static>> = rows
@@ -275,4 +271,21 @@ pub fn slash_popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         })
         .collect();
     theme::with_border(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::session::manager::SessionManager;
+
+    #[test]
+    fn cursor_column_counts_persian_like_the_terminal() {
+        let mut app = App::new(Config::default(), SessionManager::for_tests());
+        app.composer = "سلام".into();
+        app.cursor = app.composer.len();
+        // 4 cells for سلام, not 3: whole-string width() would collapse the
+        // Lam-Alef ligature and park the cursor one cell too far left.
+        assert_eq!(layout(&app, 80).cursor_col, PREFIX_W + 4);
+    }
 }
