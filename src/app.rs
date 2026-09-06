@@ -424,21 +424,26 @@ impl App {
                     self.models.loading = false;
                     self.models.error = None;
                     self.models.fetched_at = Some(Instant::now());
-                    self.models_rx = Some(rx);
+                    // The fetch sends exactly one message and then closes the
+                    // channel: drop the receiver with it, so a later poll
+                    // can't mistake that close for a failed fetch.
                     self.retarget_models_overlay();
                     return;
                 }
                 Ok(Err(error)) => {
                     self.models.loading = false;
                     self.models.error = Some(error.to_string());
-                    self.models_rx = Some(rx);
                     return;
                 }
                 Err(TryRecvError::Empty) => {
+                    // Still in flight — poll again next frame.
                     self.models_rx = Some(rx);
                     return;
                 }
                 Err(TryRecvError::Disconnected) => {
+                    // Only reachable when the task ended without sending a
+                    // result at all (it always sends one), so this is a real
+                    // failure and not the normal end of a completed fetch.
                     self.models.loading = false;
                     self.models.error = Some("model list fetch ended unexpectedly".into());
                     return;
@@ -1129,6 +1134,13 @@ mod tests {
         assert!(app.models.error.is_none());
         // The selection jumped to the active model, `b/2`.
         assert!(matches!(app.overlay, Some(Overlay::Models { selected: 1 })));
+
+        // A later poll sees the fetch's closed channel — it must NOT be
+        // mistaken for a failure and wipe the freshly loaded list.
+        app.receive_models();
+        assert!(app.models.error.is_none());
+        assert_eq!(app.models.ids, vec!["a/1", "b/2", "c/3"]);
+        assert!(!app.models.loading);
     }
 
     #[tokio::test]
@@ -1143,6 +1155,9 @@ mod tests {
         app.models_rx = Some(rx);
         app.receive_models();
         assert!(!app.models.loading);
+        assert_eq!(app.models.error.as_deref(), Some("HTTP 401"));
+        // A later poll over the closed channel keeps the original error.
+        app.receive_models();
         assert_eq!(app.models.error.as_deref(), Some("HTTP 401"));
     }
 
