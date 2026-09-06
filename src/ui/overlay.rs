@@ -13,6 +13,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
         Overlay::Shortcuts => shortcuts(frame, area),
         Overlay::History { selected } => history(frame, area, app, selected),
         Overlay::Code { selected } => code(frame, area, app, selected),
+        Overlay::Models { selected } => models(frame, area, app, selected),
     }
 }
 
@@ -147,6 +148,70 @@ fn code(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
     render_card(frame, area, lines);
 }
 
+fn models(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Models", Style::new().bold()),
+        Span::styled(
+            "   ↑↓ select · enter switch · r refresh · esc close",
+            theme::dim(),
+        ),
+    ])];
+    lines.push(Line::from(""));
+
+    if app.models.ids.is_empty() {
+        if app.models.loading {
+            lines.push(Line::styled("loading models from the API…", theme::dim()));
+        } else if let Some(error) = &app.models.error {
+            lines.push(Line::from(Span::styled(
+                format!("couldn't load models: {error}"),
+                Style::new().fg(Color::Red),
+            )));
+            lines.push(Line::styled("press r to retry", theme::dim()));
+        } else {
+            lines.push(Line::styled(
+                "no models available — press r to fetch",
+                theme::dim(),
+            ));
+        }
+        render_card(frame, area, lines);
+        return;
+    }
+
+    let selected = selected.min(app.models.ids.len() - 1);
+    let max_rows = crate::app::OVERLAY_ROWS;
+    let start = selected.saturating_sub(max_rows - 1);
+    let end = (start + max_rows).min(app.models.ids.len());
+    for (offset, id) in app.models.ids[start..end].iter().enumerate() {
+        let index = start + offset;
+        let is_selected = index == selected;
+        let marker = if is_selected { "> " } else { "  " };
+        let label = format!("{marker}{id}");
+        let meta = if id == &app.config.model {
+            "  · active"
+        } else {
+            ""
+        };
+        let line = if is_selected {
+            Line::from(vec![
+                Span::styled(label, Style::new().bold().bg(theme::SELECT_BG)),
+                Span::styled(meta, theme::dim().bg(theme::SELECT_BG)),
+            ])
+        } else {
+            Line::from(vec![Span::raw(label), Span::styled(meta, theme::dim())])
+        };
+        lines.push(line);
+    }
+    if app.models.loading {
+        lines.push(Line::styled("refreshing…", theme::dim()));
+    } else if let Some(error) = &app.models.error {
+        lines.push(Line::from(Span::styled(
+            format!("refresh failed: {error}"),
+            Style::new().fg(Color::Red),
+        )));
+    }
+    render_card(frame, area, lines);
+}
+
 /// Maximum preview width in the code list, in terminal cells.
 const PREVIEW_WIDTH: usize = 48;
 
@@ -221,6 +286,30 @@ mod tests {
     use crate::config::Config;
     use crate::session::manager::SessionManager;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn models_card_renders_in_every_state() {
+        let mut app = App::new(Config::default(), SessionManager::for_tests());
+        app.config.model = "b/2".into();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        // loading
+        app.overlay = Some(Overlay::Models { selected: 0 });
+        app.models.loading = true;
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+
+        // loaded, with the active model marked
+        app.models.loading = false;
+        app.models.ids = vec!["a/1".into(), "b/2".into()];
+        app.overlay = Some(Overlay::Models { selected: 1 });
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+
+        // error state
+        app.models.ids.clear();
+        app.models.error = Some("HTTP 401".into());
+        app.overlay = Some(Overlay::Models { selected: 0 });
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+    }
 
     #[test]
     fn preview_sanitizes_layout_breaking_characters() {

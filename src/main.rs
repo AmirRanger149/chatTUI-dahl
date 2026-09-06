@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         app.receive_token().await;
+        app.receive_models();
         terminal.draw(|frame| ui::render(frame, app))?;
 
         if event::poll(Duration::from_millis(50))? {
@@ -114,6 +115,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 KeyCode::PageUp => app.move_code_selection(-(app::OVERLAY_ROWS as i32)),
                 KeyCode::PageDown => app.move_code_selection(app::OVERLAY_ROWS as i32),
                 KeyCode::Enter => app.copy_selected_code(),
+                _ => {}
+            }
+            return true;
+        }
+        Some(app::Overlay::Models { .. }) => {
+            match key.code {
+                KeyCode::Up => app.move_model_selection(-1),
+                KeyCode::Down => app.move_model_selection(1),
+                KeyCode::PageUp => app.move_model_selection(-(app::OVERLAY_ROWS as i32)),
+                KeyCode::PageDown => app.move_model_selection(app::OVERLAY_ROWS as i32),
+                KeyCode::Enter => app.apply_selected_model(),
+                KeyCode::Char('r') | KeyCode::Char('R') => app.refresh_models(),
                 _ => {}
             }
             return true;

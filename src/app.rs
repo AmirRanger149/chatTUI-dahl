@@ -1,4 +1,4 @@
-use crate::api::client::ApiClient;
+use crate::api::client::{ApiClient, StreamEvent};
 use crate::config::Config;
 use crate::session::manager::SessionManager;
 use anyhow::Result;
@@ -9,9 +9,11 @@ use tokio::sync::mpsc::{self, Receiver};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PLACEHOLDER: &str = "Ask chatTUI to do anything";
 pub const MAX_COMPOSER_ROWS: usize = 8;
-/// Number of rows visible inside overlay lists (history / code); also the
-/// page size for pgup/pgdn navigation within an overlay.
+/// Number of rows visible inside overlay lists (history / models / code); also
+/// the page size for pgup/pgdn navigation within an overlay.
 pub const OVERLAY_ROWS: usize = 12;
+/// How long a fetched model list stays fresh before `/model` refetches it.
+const MODELS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const QUIT_PRIME_WINDOW: Duration = std::time::Duration::from_secs(2);
 
 pub struct SlashCmd {
@@ -24,7 +26,7 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/new", desc: "Start a new conversation" },
     SlashCmd { name: "/history", desc: "Browse saved conversations" },
     SlashCmd { name: "/code", desc: "Browse & copy code blocks" },
-    SlashCmd { name: "/model", desc: "Switch model — /model <model-id>" },
+    SlashCmd { name: "/model", desc: "Pick a model from the API's list" },
     SlashCmd { name: "/quit", desc: "Exit chatTUI" },
 ];
 
@@ -43,6 +45,16 @@ pub enum Overlay {
     Shortcuts,
     History { selected: usize },
     Code { selected: usize },
+    Models { selected: usize },
+}
+
+/// The API's model list, fetched in the background for the `/model` picker.
+#[derive(Debug, Default)]
+pub struct ModelCatalog {
+    pub ids: Vec<String>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub fetched_at: Option<Instant>,
 }
 
 pub struct App {
@@ -52,7 +64,9 @@ pub struct App {
     pub response: String,
     pub streaming: bool,
     pub stream_started: Option<Instant>,
-    pub tokens: Option<Receiver<Result<String>>>,
+    pub tokens: Option<Receiver<StreamEvent>>,
+    pub models: ModelCatalog,
+    models_rx: Option<Receiver<Result<Vec<String>>>>,
     pub composer: String,
     /// Byte offset of the editing cursor inside `composer` (char boundary).
     pub cursor: usize,
@@ -77,6 +91,8 @@ impl App {
             streaming: false,
             stream_started: None,
             tokens: None,
+            models: ModelCatalog::default(),
+            models_rx: None,
             composer: String::new(),
             cursor: 0,
             prompt_history: Vec::new(),
@@ -284,6 +300,186 @@ impl App {
                 self.push_notice(message);
             }
             Err(error) => self.push_error(format!("clipboard failed: {error}")),
+        }
+        self.overlay = None;
+    }
+
+    // -- model picker ----------------------------------------------------------
+
+    /// Index of the active model in the catalog, or `0` when unknown.
+    fn current_model_index(&self) -> usize {
+        self.models
+            .ids
+            .iter()
+            .position(|id| *id == self.config.model)
+            .unwrap_or(0)
+    }
+
+    /// Resolve a `/model <arg>` argument against the cached model list:
+    /// exact (case-insensitive) first, then a unique prefix, then a unique
+    /// suffix — so `minimaxai/minimax-m2.7` and even `minimax-m2.7` both
+    /// find `MiniMaxAI/MiniMax-M2.7`. Anything ambiguous or unknown comes
+    /// back as typed.
+    fn lookup_model(&self, argument: &str) -> String {
+        if let Some(id) = self
+            .models
+            .ids
+            .iter()
+            .find(|id| id.eq_ignore_ascii_case(argument))
+        {
+            return id.clone();
+        }
+        let lower = argument.to_ascii_lowercase();
+        let starts: Vec<&String> = self
+            .models
+            .ids
+            .iter()
+            .filter(|id| id.to_ascii_lowercase().starts_with(&lower))
+            .collect();
+        if starts.len() == 1 {
+            return starts[0].clone();
+        }
+        let ends: Vec<&String> = self
+            .models
+            .ids
+            .iter()
+            .filter(|id| id.to_ascii_lowercase().ends_with(&lower))
+            .collect();
+        if ends.len() == 1 {
+            return ends[0].clone();
+        }
+        argument.to_string()
+    }
+
+    /// `/model` with no argument: open the picker backed by the API's model
+    /// list and fetch it in the background if there is no fresh copy.
+    pub fn open_models(&mut self) {
+        if self
+            .config
+            .api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            self.push_error(
+                "set DAHL_API_KEY to list the models available through the API".into(),
+            );
+            return;
+        }
+        let selected = self.current_model_index();
+        self.overlay = Some(Overlay::Models { selected });
+        self.ensure_models();
+    }
+
+    /// Fetch the model list unless a fetch is running or the cache is fresh.
+    fn ensure_models(&mut self) {
+        if self.models_rx.is_some() || self.models.loading {
+            return;
+        }
+        if self
+            .models
+            .fetched_at
+            .is_some_and(|at| at.elapsed() < MODELS_CACHE_TTL)
+        {
+            return;
+        }
+        self.request_models();
+    }
+
+    /// Force a re-fetch (`r` inside the picker).
+    pub fn refresh_models(&mut self) {
+        if self.models_rx.is_some() {
+            return;
+        }
+        self.request_models();
+    }
+
+    fn request_models(&mut self) {
+        let Some(api_key) = self.config.api_key.clone() else {
+            self.models.loading = false;
+            self.models.error = Some("no API key configured".into());
+            return;
+        };
+        let client = ApiClient::new(api_key, self.config.base_url.clone());
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = tx.send(client.list_models().await).await;
+        });
+        self.models_rx = Some(rx);
+        self.models.loading = true;
+        self.models.error = None;
+    }
+
+    /// Drain the background model-list fetch, if one finished.
+    pub fn receive_models(&mut self) {
+        if self.models_rx.is_none() {
+            return;
+        }
+        let mut rx = self.models_rx.take().expect("checked above");
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(ids)) => {
+                    self.models.ids = ids;
+                    self.models.loading = false;
+                    self.models.error = None;
+                    self.models.fetched_at = Some(Instant::now());
+                    self.models_rx = Some(rx);
+                    self.retarget_models_overlay();
+                    return;
+                }
+                Ok(Err(error)) => {
+                    self.models.loading = false;
+                    self.models.error = Some(error.to_string());
+                    self.models_rx = Some(rx);
+                    return;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.models_rx = Some(rx);
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.models.loading = false;
+                    self.models.error = Some("model list fetch ended unexpectedly".into());
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Point the picker's selection at the active model when fresh data lands.
+    fn retarget_models_overlay(&mut self) {
+        if !matches!(self.overlay, Some(Overlay::Models { .. })) {
+            return;
+        }
+        let index = self.current_model_index();
+        if let Some(Overlay::Models { selected }) = &mut self.overlay {
+            *selected = index;
+        }
+    }
+
+    pub fn move_model_selection(&mut self, delta: i32) {
+        let len = self.models.ids.len();
+        if len == 0 {
+            return;
+        }
+        if let Some(Overlay::Models { selected }) = &mut self.overlay {
+            *selected = (*selected as i32 + delta).rem_euclid(len as i32) as usize;
+        }
+    }
+
+    /// `Enter` in the picker: make the highlighted model the active one.
+    pub fn apply_selected_model(&mut self) {
+        let Some(Overlay::Models { selected }) = self.overlay else {
+            return;
+        };
+        let Some(id) = self.models.ids.get(selected).cloned() else {
+            self.overlay = None;
+            return;
+        };
+        if id != self.config.model {
+            self.config.model = id.clone();
+            self.push_notice(format!("model set to {id}"));
         }
         self.overlay = None;
     }
@@ -569,10 +765,22 @@ impl App {
             "/code" => self.open_code(),
             "/model" => {
                 if argument.is_empty() {
-                    self.push_error("usage: /model <model-id>".into());
+                    self.open_models();
                 } else {
-                    self.config.model = argument.clone();
-                    self.push_notice(format!("model set to {argument}"));
+                    // Resolve against the cached model list when one is
+                    // available (exact, unique prefix or unique suffix);
+                    // anything else is set exactly as typed.
+                    let model = self.lookup_model(&argument);
+                    self.config.model = model.clone();
+                    if !self.models.ids.is_empty()
+                        && !self.models.ids.iter().any(|id| *id == model)
+                    {
+                        self.push_notice(format!(
+                            "model set to {model} — not in the API's model list"
+                        ));
+                    } else {
+                        self.push_notice(format!("model set to {model}"));
+                    }
                 }
             }
             "/quit" => self.should_quit = true,
@@ -643,7 +851,7 @@ impl App {
                 .stream_chat(&messages, &model, temperature, tx.clone())
                 .await
             {
-                let _ = tx.send(Err(error)).await;
+                let _ = tx.send(StreamEvent::Error(error.to_string())).await;
             }
         });
         self.tokens = Some(rx);
@@ -658,12 +866,14 @@ impl App {
         };
         loop {
             match rx.try_recv() {
-                Ok(Ok(token)) => self.response.push_str(&token),
-                Ok(Err(error)) => {
+                Ok(StreamEvent::Delta(token)) => self.response.push_str(&token),
+                // Fallback announcements etc. — the stream keeps going.
+                Ok(StreamEvent::Notice(message)) => self.push_notice(message),
+                Ok(StreamEvent::Error(error)) => {
                     self.finish_partial();
                     self.streaming = false;
                     self.stream_started = None;
-                    self.push_error(error.to_string());
+                    self.push_error(error);
                     return;
                 }
                 Err(TryRecvError::Empty) => {
@@ -883,5 +1093,147 @@ mod tests {
         } else {
             panic!("history overlay should be open");
         }
+    }
+
+    #[test]
+    fn model_picker_needs_an_api_key() {
+        let mut app = test_app();
+        app.config.api_key = None;
+        app.open_models();
+        assert!(app.overlay.is_none());
+        assert!(matches!(app.cells.last(), Some(Cell::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn model_picker_opens_and_retargets_when_models_arrive() {
+        let mut app = test_app();
+        app.config.model = "b/2".into();
+        app.config.api_key = Some("key".into());
+        // Keep the background fetch away from the network.
+        app.config.base_url = "http://127.0.0.1:9".into();
+        app.open_models();
+        assert!(matches!(app.overlay, Some(Overlay::Models { selected: 0 })));
+        assert!(app.models.loading);
+
+        // Simulate the background fetch completing (list_models already
+        // sorted the ids).
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Ok(vec!["a/1".into(), "b/2".into(), "c/3".into()]))
+            .await
+            .unwrap();
+        drop(tx);
+        app.models_rx = Some(rx);
+        app.receive_models();
+        assert_eq!(app.models.ids, vec!["a/1", "b/2", "c/3"]);
+        assert!(!app.models.loading);
+        assert!(app.models.error.is_none());
+        // The selection jumped to the active model, `b/2`.
+        assert!(matches!(app.overlay, Some(Overlay::Models { selected: 1 })));
+    }
+
+    #[tokio::test]
+    async fn model_picker_reports_a_failed_fetch() {
+        let mut app = test_app();
+        app.config.api_key = Some("key".into());
+        app.config.base_url = "http://127.0.0.1:9".into();
+        app.open_models();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Err(anyhow::anyhow!("HTTP 401"))).await.unwrap();
+        drop(tx);
+        app.models_rx = Some(rx);
+        app.receive_models();
+        assert!(!app.models.loading);
+        assert_eq!(app.models.error.as_deref(), Some("HTTP 401"));
+    }
+
+    #[tokio::test]
+    async fn model_picker_selection_wraps_and_applies() {
+        let mut app = test_app();
+        app.config.api_key = Some("key".into());
+        app.config.base_url = "http://127.0.0.1:9".into();
+        app.models.ids = vec!["a/1".into(), "b/2".into(), "c/3".into()];
+        app.overlay = Some(Overlay::Models { selected: 2 });
+        app.move_model_selection(1); // wraps to the top
+        assert!(matches!(app.overlay, Some(Overlay::Models { selected: 0 })));
+        app.apply_selected_model();
+        assert_eq!(app.config.model, "a/1");
+        assert!(app.overlay.is_none());
+        assert!(matches!(app.cells.last(), Some(Cell::Notice(_))));
+
+        // Re-applying the already-active model stays quiet.
+        let notices = app.cells.len();
+        app.open_models();
+        assert!(matches!(app.overlay, Some(Overlay::Models { selected: 0 })));
+        app.apply_selected_model();
+        assert_eq!(app.cells.len(), notices);
+        assert_eq!(app.config.model, "a/1");
+    }
+
+    #[test]
+    fn slash_model_argument_sets_directly_and_resolves() {
+        let mut app = test_app();
+        app.models.ids = vec!["MiniMaxAI/MiniMax-M2.7".into(), "Other/Model".into()];
+        // Exact match, case-insensitive.
+        app.composer = "/model minimaxai/minimax-m2.7".into();
+        app.submit();
+        assert_eq!(app.config.model, "MiniMaxAI/MiniMax-M2.7");
+        // Unique suffix shorthand.
+        app.composer = "/model minimax-m2.7".into();
+        app.submit();
+        assert_eq!(app.config.model, "MiniMaxAI/MiniMax-M2.7");
+        // Unknown → set exactly as typed.
+        app.composer = "/model totally/unknown".into();
+        app.submit();
+        assert_eq!(app.config.model, "totally/unknown");
+        assert!(matches!(app.cells.last(), Some(Cell::Notice(_))));
+    }
+
+    #[test]
+    fn model_lookup_resolves_exact_prefix_and_suffix() {
+        let mut app = test_app();
+        app.models.ids = vec![
+            "MiniMaxAI/MiniMax-M1".into(),
+            "MiniMaxAI/MiniMax-M2.7".into(),
+            "OpenAI/gpt-x".into(),
+        ];
+        assert_eq!(app.lookup_model("openai/gpt-x"), "OpenAI/gpt-x");
+        assert_eq!(
+            app.lookup_model("minimaxai/minimax-m1"),
+            "MiniMaxAI/MiniMax-M1"
+        );
+        // Unique suffix shorthand.
+        assert_eq!(app.lookup_model("minimax-m2.7"), "MiniMaxAI/MiniMax-M2.7");
+        // Ambiguous prefixes/suffixes stay untouched.
+        assert_eq!(app.lookup_model("minimax"), "minimax");
+        assert_eq!(app.lookup_model("nonexistent"), "nonexistent");
+        // No catalog → as typed.
+        app.models.ids.clear();
+        assert_eq!(app.lookup_model("anything"), "anything");
+    }
+
+    #[test]
+    fn stream_notices_become_transcript_rows() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.try_send(StreamEvent::Notice("switching to b/2".into()))
+            .unwrap();
+        tx.try_send(StreamEvent::Delta("hel".into())).unwrap();
+        let mut app = test_app();
+        app.streaming = true;
+        app.tokens = Some(rx);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(app.receive_token());
+        assert_eq!(app.response, "hel");
+        assert_eq!(app.cells.len(), 1);
+        assert!(matches!(app.cells.last(), Some(Cell::Notice(_))));
+
+        // Dropping the sender ends the stream and commits the partial answer.
+        drop(tx);
+        runtime.block_on(app.receive_token());
+        assert!(!app.streaming);
+        assert_eq!(app.cells.len(), 2);
+        assert!(matches!(app.cells[0], Cell::Notice(_)));
+        assert_eq!(app.cells[1], Cell::Assistant("hel".into()));
     }
 }
