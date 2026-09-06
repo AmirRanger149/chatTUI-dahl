@@ -17,6 +17,9 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 - Configurable Dahl model, temperature, and API endpoint
 - Markdown-friendly response output with shaded code boxes
 - Copy any code block from a response to the clipboard (`ctrl+g` or `/code`)
+- Animated reasoning view for thinking models such as `MiniMaxAI/MiniMax-M2.7`:
+  `<think> … </think>` output streams as a shimmering `Thinking` cell, then
+  collapses to a one-line `Thought for N words` summary you can reopen with `ctrl+r`
 - A single native Rust binary with no Python or OpenAI SDK dependency
 
 ## Before You Start

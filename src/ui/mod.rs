@@ -7,6 +7,7 @@ pub mod markdown;
 pub mod overlay;
 pub mod status;
 pub mod theme;
+pub mod thinking;
 pub mod transcript;
 
 use crate::app::App;
@@ -103,8 +104,20 @@ mod tests {
         app.response = "streaming **response**".into();
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
-        // overlays
+        // streaming reasoning (<think> …) and a finished, collapsed block
+        app.response = "<think>weighing the options".into();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
         app.streaming = false;
+        app.response.clear();
+        app.cells.push(crate::app::Cell::Assistant(
+            "<think>because of X</think>Here is the answer.".into(),
+        ));
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        app.show_thinking = true;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        app.show_thinking = false;
+
+        // overlays
         app.overlay = Some(crate::app::Overlay::Shortcuts);
         terminal.draw(|frame| render(frame, &app)).unwrap();
         app.open_history();

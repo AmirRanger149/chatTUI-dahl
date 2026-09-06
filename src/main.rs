@@ -79,6 +79,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.toggle_code();
             return true;
         }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_thinking();
+            return true;
+        }
         _ => {}
     }
 
