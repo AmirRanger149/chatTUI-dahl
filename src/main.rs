@@ -131,6 +131,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             return true;
         }
+        Some(app::Overlay::Providers { .. }) => {
+            match key.code {
+                KeyCode::Up => app.move_provider_selection(-1),
+                KeyCode::Down => app.move_provider_selection(1),
+                KeyCode::PageUp => app.move_provider_selection(-(app::OVERLAY_ROWS as i32)),
+                KeyCode::PageDown => app.move_provider_selection(app::OVERLAY_ROWS as i32),
+                KeyCode::Enter => app.apply_selected_provider(),
+                _ => {}
+            }
+            return true;
+        }
         None => {}
     }
 

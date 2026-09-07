@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
         Overlay::History { selected } => history(frame, area, app, selected),
         Overlay::Code { selected } => code(frame, area, app, selected),
         Overlay::Models { selected } => models(frame, area, app, selected),
+        Overlay::Providers { selected } => providers(frame, area, app, selected),
     }
 }
 
@@ -212,6 +213,43 @@ fn models(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
     render_card(frame, area, lines);
 }
 
+fn providers(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("API Providers", Style::new().bold()),
+        Span::styled(
+            "   ↑↓ select · enter switch · esc close",
+            theme::dim(),
+        ),
+    ])];
+    lines.push(Line::from(""));
+
+    let selected = selected.min(crate::config::PROVIDERS.len().saturating_sub(1));
+    for (index, provider) in crate::config::PROVIDERS.iter().enumerate() {
+        let is_selected = index == selected;
+        let is_active = provider.id == app.config.provider;
+        let marker = if is_selected { "> " } else { "  " };
+        let has_key = app.config.api_key_for_provider(provider.id).is_some();
+        let key_status = if has_key { "key configured" } else { "no key" };
+
+        let label = format!("{marker}{:<8}  · {}", provider.name, provider.base_url);
+        let meta = if is_active {
+            format!("  · active ({key_status})")
+        } else {
+            format!("  · ({key_status})")
+        };
+        let line = if is_selected {
+            Line::from(vec![
+                Span::styled(label, Style::new().bold().bg(theme::SELECT_BG)),
+                Span::styled(meta, theme::dim().bg(theme::SELECT_BG)),
+            ])
+        } else {
+            Line::from(vec![Span::raw(label), Span::styled(meta, theme::dim())])
+        };
+        lines.push(line);
+    }
+    render_card(frame, area, lines);
+}
+
 /// Maximum preview width in the code list, in terminal cells.
 const PREVIEW_WIDTH: usize = 48;
 
@@ -308,6 +346,12 @@ mod tests {
         app.models.ids.clear();
         app.models.error = Some("HTTP 401".into());
         app.overlay = Some(Overlay::Models { selected: 0 });
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+
+        // providers overlay
+        app.overlay = Some(Overlay::Providers { selected: 0 });
+        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
+        app.overlay = Some(Overlay::Providers { selected: 1 });
         terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
     }
 

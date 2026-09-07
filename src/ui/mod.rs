@@ -139,6 +139,10 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         app.models.ids.clear();
 
+        // providers overlay
+        app.overlay = Some(crate::app::Overlay::Providers { selected: 0 });
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
         // tiny terminal
         app.overlay = None;
         let mut tiny = Terminal::new(TestBackend::new(20, 6)).unwrap();

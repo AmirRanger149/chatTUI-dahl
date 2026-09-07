@@ -30,7 +30,7 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 You need:
 
 - Rust and Cargo from [rustup.rs](https://rustup.rs/)
-- A Dahl API key from [Dahl Inference](https://inference.dahl.global/)
+- An API key from [Dahl Inference](https://inference.dahl.global/) and/or [APInex](https://api.apinex.bond/v1)
 
 Check your Rust installation:
 
@@ -60,51 +60,63 @@ Or run directly while developing:
 cargo run
 ```
 
-## Configure Your Dahl Key
+## Configuration (`config.json`)
 
-### Environment variable
+`chatTUI` looks for `config.json` in the application directory or the current working directory.
 
-This is the quickest option:
+### Full & Complete `config.json` Template
 
-```bash
-export DAHL_API_KEY="your-key"
-cargo run --release
-```
-
-You can put the export in your shell profile if you use the app regularly.
-
-### `dahl.json`
-
-The app looks for `dahl.json` beside the compiled application first. When
-running with `cargo run`, it also checks the current working directory. Its
-contents can look like this:
+Create a `config.json` file in your root folder:
 
 ```json
 {
-  "api_key": "your-key",
-  "model": "MiniMaxAI/MiniMax-M2.7",
+  "dahl_api_key": "your-dahl-key-here",
+  "apinex_api_key": "sk-apx-your-apinex-key-here",
   "temperature": 0.7
 }
 ```
 
-The API key is read from this file so you do not need to enter it each time.
-Keep this file private and never commit it.
+### Single Provider Examples
 
-Environment variables take priority for the key-related values:
+If you only use one provider, you can include just that key:
 
-```text
-DAHL_API_KEY
-DAHL_BASE_URL
-DAHL_MODEL
-```
-
-### Example file
-
+**For APInex:**
 ```json
 {
-  "api_key": "your-key",
-  "model": "MiniMaxAI/MiniMax-M2.7"
+  "apinex_api_key": "sk-apx-your-key-here"
 }
+```
+
+**For Dahl:**
+```json
+{
+  "dahl_api_key": "your-dahl-key-here"
+}
+```
+
+> **Note:** If only one API key is present in `config.json`, chatTUI will automatically set that provider as the active default on startup. If both keys are present, Dahl is selected by default and you can switch between them anytime using the `/provider` command.
+
+### Configuration Fields
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `dahl_api_key` | API key for Dahl Inference | `None` (or `DAHL_API_KEY` env) |
+| `apinex_api_key` | API key for APInex (`sk-apx...`) | `None` (or `APINEX_API_KEY` env) |
+| `temperature` | Sampling temperature for responses | `0.7` |
+| `model` | Optional model name override | Provider default |
+
+### Environment Variables (Alternative)
+
+You can also export environment variables instead of creating a `config.json`:
+
+```bash
+# Dahl
+export DAHL_API_KEY="your-dahl-key"
+
+# APInex
+export APINEX_API_KEY="sk-apx..."
+
+cargo run --release
 ```
 
 
@@ -138,6 +150,7 @@ The composer is always focused — just start typing and press `Enter` to send.
 | `/history` | Browse saved conversations |
 | `/code` | Browse and copy code blocks |
 | `/model` | Pick a model from the API's live list (`/model <id>` sets one directly) |
+| `/provider` | Select API provider (`/provider <name>` sets one directly) |
 | `/quit` | Exit chatTUI |
 
 Type `/` to open the command palette, then `Tab` to complete.

@@ -41,6 +41,17 @@ fn header_lines(app: &App, max_inner: usize) -> Vec<Line<'static>> {
         Span::styled(" ", theme::dim()),
         Span::styled(format!("(v{})", crate::app::VERSION), theme::dim()),
     ];
+    let provider_name = app.active_provider_name();
+    let mut provider_line = vec![
+        Span::styled("provider: ", theme::dim()),
+        Span::styled(provider_name.clone(), Style::new().bold()),
+    ];
+    let prov_hint_w = "   /provider to change".len();
+    if inner > "provider: ".len() + provider_name.len() + prov_hint_w {
+        provider_line.push(Span::styled("   ", theme::dim()));
+        provider_line.push(Span::styled("/provider", Style::new().fg(theme::ACCENT)));
+        provider_line.push(Span::styled(" to change", theme::dim()));
+    }
     let mut model_line = vec![
         Span::styled("model: ", theme::dim()),
         Span::styled(app.config.model.clone(), Style::new().fg(theme::ACCENT)),
@@ -57,6 +68,7 @@ fn header_lines(app: &App, max_inner: usize) -> Vec<Line<'static>> {
     vec![
         Line::from(title),
         Line::from(""),
+        Line::from(provider_line),
         Line::from(model_line),
         Line::from(dir_line),
     ]
