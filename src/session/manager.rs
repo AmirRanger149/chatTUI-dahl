@@ -93,13 +93,6 @@ impl SessionManager {
         let _ = self.save();
     }
 
-    pub fn next_session(&mut self) {
-        if !self.store.sessions.is_empty() {
-            self.store.current = (self.store.current + 1) % self.store.sessions.len();
-            let _ = self.save();
-        }
-    }
-
     pub fn new_session(&mut self) {
         let id = self.store.sessions.last().map(|s| s.id + 1).unwrap_or(1);
         self.store.sessions.insert(
@@ -112,13 +105,6 @@ impl SessionManager {
         );
         self.store.current = 0;
         let _ = self.save();
-    }
-    pub fn delete_current(&mut self) {
-        if self.store.sessions.len() > 1 {
-            self.store.sessions.remove(self.store.current);
-            self.store.current = self.store.current.min(self.store.sessions.len() - 1);
-            let _ = self.save();
-        }
     }
     pub fn add_message(&mut self, role: impl Into<String>, content: impl Into<String>) {
         let message = Message {
