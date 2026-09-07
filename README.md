@@ -205,6 +205,27 @@ The default model is `MiniMaxAI/MiniMax-M2.7`, a reasoning model — see
 the `model` value in your config file. The model name must be available through
 Dahl; retrieve current model IDs from its `GET /v1/models` endpoint.
 
+### Availability-Based Default (APInex)
+
+APInex serves a rotating list of models — including free models published
+under the `free/` namespace, e.g. `free/deepseek-v4-flash-0731` — so a
+hardcoded default model can disappear or be replaced. When APInex is the
+active provider (at startup, or after `/provider apinex`), chatTUI fetches
+its live `GET /models` list in the background and sets the default model
+from what is actually available:
+
+1. the first free model (`free/…`), or
+2. the built-in default if it is still offered, or
+3. the first model in the live list.
+
+The pick is announced in the transcript (e.g.
+`APInex default set to available free model: free/deepseek-v4-flash-0731`).
+An explicit choice always wins — a model set with `APINEX_MODEL`, the
+`model` config field, or `/model` is never overridden — and if the fetch
+fails the built-in default stays in effect, with the usual send-time
+fallback covering a model that turns out to be unavailable. The fetched
+list doubles as the cached list shown by the `/model` picker.
+
 ### The `/model` Picker
 
 Run `/model` with no argument and chatTUI queries the endpoint's `GET /models`,

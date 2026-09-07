@@ -69,6 +69,10 @@ pub struct App {
     pub tokens: Option<Receiver<StreamEvent>>,
     pub models: ModelCatalog,
     models_rx: Option<Receiver<Result<Vec<String>>>>,
+    /// Whether the in-flight model-list fetch is a background
+    /// availability-based default-model pick (`true`) rather than a fetch
+    /// the `/model` picker explicitly requested (`false`).
+    models_fetch_auto: bool,
     pub composer: String,
     /// Byte offset of the editing cursor inside `composer` (char boundary).
     pub cursor: usize,
@@ -95,6 +99,7 @@ impl App {
             tokens: None,
             models: ModelCatalog::default(),
             models_rx: None,
+            models_fetch_auto: false,
             composer: String::new(),
             cursor: 0,
             prompt_history: Vec::new(),
@@ -107,6 +112,11 @@ impl App {
             should_quit: false,
         };
         app.rebuild_cells();
+        // For providers whose default model is availability-based (APInex),
+        // resolve the default against the endpoint's live model list in the
+        // background. Silently keeps the built-in default when the fetch
+        // fails or no key is configured.
+        app.request_available_default();
         app
     }
 
@@ -389,7 +399,7 @@ impl App {
         {
             return;
         }
-        self.request_models();
+        self.request_models(false);
     }
 
     /// Force a re-fetch (`r` inside the picker).
@@ -397,10 +407,10 @@ impl App {
         if self.models_rx.is_some() {
             return;
         }
-        self.request_models();
+        self.request_models(false);
     }
 
-    fn request_models(&mut self) {
+    fn request_models(&mut self, auto: bool) {
         let Some(api_key) = self.config.api_key.clone() else {
             self.models.loading = false;
             self.models.error = Some("no API key configured".into());
@@ -412,8 +422,40 @@ impl App {
             let _ = tx.send(client.list_models().await).await;
         });
         self.models_rx = Some(rx);
+        self.models_fetch_auto = auto;
         self.models.loading = true;
         self.models.error = None;
+    }
+
+    /// Background fetch that resolves an availability-based default model:
+    /// providers such as APInex expose a rotating model list (free models
+    /// live in the `free/` namespace, e.g. `free/deepseek-v4-flash-0731`),
+    /// so the built-in default may not be offered. When it finishes, the
+    /// active model is set to the best available match — provided the user
+    /// has not explicitly chosen one. Failures are silent: the built-in
+    /// default stays in effect and the send-time fallback still covers it.
+    fn request_available_default(&mut self) {
+        // APInex is the availability-based provider; Dahl keeps its static
+        // default model.
+        if self.config.provider != "apinex" {
+            return;
+        }
+        if self.config.api_key.as_deref().unwrap_or("").trim().is_empty() {
+            return;
+        }
+        // Don't override an explicit user choice: a model set through
+        // `APINEX_MODEL`, the config file, or `/model`. Those resolve to
+        // something other than the built-in default.
+        let Some(provider) = crate::config::find_provider(&self.config.provider) else {
+            return;
+        };
+        if !self.config.model.is_empty() && self.config.model != provider.default_model {
+            return;
+        }
+        if self.models_rx.is_some() || self.models.loading {
+            return;
+        }
+        self.request_models(true);
     }
 
     /// Drain the background model-list fetch, if one finished.
@@ -425,10 +467,19 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(Ok(ids)) => {
+                    let auto = self.models_fetch_auto;
                     self.models.ids = ids;
                     self.models.loading = false;
                     self.models.error = None;
                     self.models.fetched_at = Some(Instant::now());
+                    self.models_fetch_auto = false;
+                    if auto {
+                        // Background availability check: point the active
+                        // model at the best model the endpoint actually
+                        // offers. The fetched list doubles as the `/model`
+                        // picker's cache.
+                        self.apply_available_default();
+                    }
                     // The fetch sends exactly one message and then closes the
                     // channel: drop the receiver with it, so a later poll
                     // can't mistake that close for a failed fetch.
@@ -436,8 +487,17 @@ impl App {
                     return;
                 }
                 Ok(Err(error)) => {
+                    let auto = self.models_fetch_auto;
+                    self.models_fetch_auto = false;
                     self.models.loading = false;
-                    self.models.error = Some(error.to_string());
+                    if auto {
+                        // A background default-model check failed quietly:
+                        // keep the built-in default (the send-time fallback
+                        // still covers it) instead of surfacing an error.
+                        self.models.error = None;
+                    } else {
+                        self.models.error = Some(error.to_string());
+                    }
                     return;
                 }
                 Err(TryRecvError::Empty) => {
@@ -449,8 +509,12 @@ impl App {
                     // Only reachable when the task ended without sending a
                     // result at all (it always sends one), so this is a real
                     // failure and not the normal end of a completed fetch.
+                    let auto = self.models_fetch_auto;
+                    self.models_fetch_auto = false;
                     self.models.loading = false;
-                    self.models.error = Some("model list fetch ended unexpectedly".into());
+                    if !auto {
+                        self.models.error = Some("model list fetch ended unexpectedly".into());
+                    }
                     return;
                 }
             }
@@ -465,6 +529,38 @@ impl App {
         let index = self.current_model_index();
         if let Some(Overlay::Models { selected }) = &mut self.overlay {
             *selected = index;
+        }
+    }
+
+    /// After a background fetch, set the active model to the best model the
+    /// APInex endpoint currently offers — a free model first (`free/…`),
+    /// then the built-in default if it is still listed, otherwise the first
+    /// model in the list. No-ops when the user has since picked a model
+    /// explicitly.
+    fn apply_available_default(&mut self) {
+        if self.config.provider != "apinex" {
+            return;
+        }
+        let Some(provider) = crate::config::find_provider(&self.config.provider) else {
+            return;
+        };
+        // Respect an explicit choice made while the fetch was in flight.
+        if !self.config.model.is_empty() && self.config.model != provider.default_model {
+            return;
+        }
+        let Some(picked) = pick_available_default(&self.models.ids, provider.default_model) else {
+            return;
+        };
+        if picked == self.config.model {
+            // The built-in default is actually available — nothing to say.
+            return;
+        }
+        let was_free = picked.to_ascii_lowercase().starts_with("free/");
+        self.config.model = picked.clone();
+        if was_free {
+            self.push_notice(format!("APInex default set to available free model: {picked}"));
+        } else {
+            self.push_notice(format!("APInex default set to available model: {picked}"));
         }
     }
 
@@ -546,6 +642,11 @@ impl App {
         // Invalidate cached model list from previous provider
         self.models = ModelCatalog::default();
         self.models_rx = None;
+        self.models_fetch_auto = false;
+        // APInex's default model is availability-based: resolve it against
+        // the endpoint's live model list in the background (free models
+        // first). Silent no-op without a key or for static-default providers.
+        self.request_available_default();
 
         if self.config.api_key.is_some() {
             self.push_notice(format!(
@@ -1023,6 +1124,28 @@ impl App {
             crate::ui::theme::human_tokens(chars / 4)
         )
     }
+}
+
+/// Choose the default model for an availability-based provider from its live
+/// model list: a free model (the `free/` namespace, e.g.
+/// `free/deepseek-v4-flash-0731`) wins; otherwise the built-in default if it
+/// is still offered; otherwise the first model in the list. The list arrives
+/// sorted case-insensitively (see [`ApiClient::list_models`]), so both the
+/// free pick and the fallback are deterministic.
+fn pick_available_default(ids: &[String], builtin_default: &str) -> Option<String> {
+    if let Some(free) = ids
+        .iter()
+        .find(|id| id.trim().to_ascii_lowercase().starts_with("free/"))
+    {
+        return Some(free.clone());
+    }
+    if let Some(current) = ids
+        .iter()
+        .find(|id| id.eq_ignore_ascii_case(builtin_default))
+    {
+        return Some(current.clone());
+    }
+    ids.first().cloned()
 }
 
 #[cfg(test)]
