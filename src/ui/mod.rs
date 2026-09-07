@@ -130,6 +130,15 @@ mod tests {
         app.open_code();
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
+        // models overlay (loading + loaded)
+        app.overlay = Some(crate::app::Overlay::Models { selected: 0 });
+        app.models.loading = true;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        app.models.loading = false;
+        app.models.ids = vec!["MiniMaxAI/MiniMax-M2.7".into()];
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        app.models.ids.clear();
+
         // tiny terminal
         app.overlay = None;
         let mut tiny = Terminal::new(TestBackend::new(20, 6)).unwrap();

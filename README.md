@@ -15,6 +15,10 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 - Local conversation history saved as JSON
 - History drawer for returning to previous chats
 - Configurable Dahl model, temperature, and API endpoint
+- `/model` picker that lists the models the API actually offers (`GET /models`)
+  and marks the active one
+- Automatic fallback: if a model rejects the request or is at high demand,
+  chatTUI switches to another available model and announces the switch
 - Markdown-friendly response output with shaded code boxes
 - Copy any code block from a response to the clipboard (`ctrl+g` or `/code`)
 - Animated reasoning view for thinking models such as `MiniMaxAI/MiniMax-M2.7`
@@ -133,7 +137,7 @@ The composer is always focused — just start typing and press `Enter` to send.
 | `/new` | Start a new conversation |
 | `/history` | Browse saved conversations |
 | `/code` | Browse and copy code blocks |
-| `/model <id>` | Switch model |
+| `/model` | Pick a model from the API's live list (`/model <id>` sets one directly) |
 | `/quit` | Exit chatTUI |
 
 Type `/` to open the command palette, then `Tab` to complete.
@@ -188,6 +192,40 @@ The default model is `MiniMaxAI/MiniMax-M2.7`, a reasoning model — see
 the `model` value in your config file. The model name must be available through
 Dahl; retrieve current model IDs from its `GET /v1/models` endpoint.
 
+### The `/model` Picker
+
+Run `/model` with no argument and chatTUI queries the endpoint's `GET /models`,
+then shows what is actually available in a popup: your current model is marked
+`· active` and preselected, `↑↓` (or `PgUp` / `PgDn`) move through the list,
+and `Enter` switches to the highlighted model. Press `r` to refetch the list
+from the API and `esc` to close. The list is cached for five minutes so
+reopening the picker is instant.
+
+`/model <id>` still sets a model directly. When a fetched list is cached, the
+id is resolved against it — exact match (case-insensitive), then a unique
+prefix, then a unique suffix — so both `/model minimaxai/minimax-m2.7` and the
+shorthand `/model minimax-m2.7` find `MiniMaxAI/MiniMax-M2.7`. Anything
+ambiguous or unknown is set exactly as typed.
+
+### Automatic Model Fallback
+
+When a send fails because of the model — a bad request against it, a
+model that no longer exists, throttling, or the classic "currently
+experiencing high demand" overload — chatTUI fetches the endpoint's model
+list, picks another available model (preferring one from the same family,
+e.g. another `MiniMaxAI/…`), and retries. Every switch is announced in the
+transcript, so you always know which model answered:
+
+```text
+⚠ MiniMaxAI/MiniMax-M2.7 is unavailable — the model rejected the request (HTTP 429: rate limit exceeded)
+  switching to MiniMaxAI/MiniMax-M1
+```
+
+Up to three fallbacks are tried per message, and the request is only retried
+before any output has been written — a stream that breaks mid-answer is
+reported as-is instead of being spliced onto a second model. Authentication
+failures are reported immediately, since a different model cannot fix those.
+
 The client uses this endpoint internally by default, so it does not need to be
 present in `config.json`:
 
@@ -222,7 +260,10 @@ above.
 
 **The model is rejected**
 
-Check the spelling and confirm that the model is available through `GET /v1/models`.
+Type `/model` to pick from the list the API actually offers. If a request is
+rejected by a model that is overloaded or no longer available, chatTUI
+automatically retries with another available model and tells you in the
+transcript.
 
 **The request fails or times out**
 
