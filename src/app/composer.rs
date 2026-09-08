@@ -34,7 +34,8 @@ impl App {
         self.cursor += ch.len_utf8();
     }
 
-    /// `shift+enter` / `alt+enter`: newline at the cursor position.
+    /// `shift+enter` / `alt+enter` / `ctrl+enter` / `ctrl+j`: newline at the
+    /// cursor position.
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
     }

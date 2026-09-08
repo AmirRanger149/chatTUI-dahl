@@ -130,6 +130,7 @@ The composer is always focused — just start typing and press `Enter` to send.
 | --- | --- |
 | `Enter` | Send the message |
 | `Shift+Enter` | Newline in the composer |
+| `Ctrl+J` | Newline in the composer (works in every terminal) |
 | `Esc` | Close a popup, then interrupt a running stream, then clear the composer |
 | `Ctrl+T` | Conversation history |
 | `Ctrl+G` | Browse and copy code blocks |
@@ -140,6 +141,13 @@ The composer is always focused — just start typing and press `Enter` to send.
 | `Ctrl+U` | Clear the composer |
 | `?` | Keyboard shortcuts |
 | `Ctrl+C` ×2 | Quit |
+
+A shifted enter only differs from a plain enter when the terminal reports
+modified keys (the Kitty keyboard protocol: kitty, WezTerm, Ghostty, foot,
+iTerm2, Windows Terminal, recent GNOME Terminal / VS Code). chatTUI requests
+that mode at startup; terminals that don't understand the request — and `tmux`
+unless you `set -g allow-passthrough on` — keep sending a bare enter, so use
+`Ctrl+J` (or `Alt+Enter`) for a newline there.
 
 ### Slash commands
 

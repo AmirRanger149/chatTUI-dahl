@@ -19,8 +19,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, overlay: Overlay) {
 }
 
 fn shortcuts(frame: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 10] = [
+    let rows: [(&str, &str); 11] = [
         ("enter", "send message"),
+        ("shift+enter", "newline in composer"),
+        ("ctrl+j", "newline (any terminal)"),
         ("esc", "close popup · interrupt stream"),
         ("ctrl+t", "conversation history"),
         ("ctrl+g", "copy code blocks"),
@@ -28,7 +30,6 @@ fn shortcuts(frame: &mut Frame, area: Rect) {
         ("pgup / pgdn", "scroll transcript"),
         ("up / down", "prompt history"),
         ("← / →", "move cursor · ctrl jumps words"),
-        ("shift+enter", "newline in composer"),
         ("ctrl+c ×2", "quit"),
     ];
     let key_w = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);

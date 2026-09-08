@@ -10,7 +10,10 @@ use anyhow::Result;
 use app::App;
 use config::Config;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -40,7 +43,10 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
             loop {
                 match event::read()? {
                     Event::Key(key) => {
-                        if !handle_key(app, key) {
+                        // Terminals speaking the Kitty keyboard protocol also
+                        // report key *release* events; acting on them would run
+                        // every keystroke twice.
+                        if !matches!(key.kind, KeyEventKind::Release) && !handle_key(app, key) {
                             return Ok(());
                         }
                     }
@@ -161,15 +167,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     // The composer is always active, like codex.
     match key.code {
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+        // Any modified enter starts a new line: shift+enter, alt+enter and
+        // ctrl+enter. They are only distinguishable from a plain enter when
+        // the terminal reports modified keys (Kitty keyboard protocol,
+        // requested at startup).
+        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if is_modified(key) => {
             app.insert_newline();
             app.on_composer_changed();
         }
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+        // ctrl+j is the universal newline: byte 0x0A reaches every terminal
+        // even when modified enters cannot be reported at all.
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.insert_newline();
             app.on_composer_changed();
         }
-        KeyCode::Enter => app.submit(),
+        KeyCode::Enter | KeyCode::Char('\r') => app.submit(),
         KeyCode::Tab => app.accept_slash(),
         KeyCode::Backspace => {
             app.backspace();
@@ -205,13 +217,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     true
 }
 
+/// True when the key carries shift, alt or ctrl.
+fn is_modified(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::SHIFT)
+        || key.modifiers.contains(KeyModifiers::ALT)
+        || key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
+    // Ask the terminal to report modified keys with the Kitty keyboard
+    // protocol. This is what makes shift+enter differ from enter: without it
+    // almost every terminal sends a bare CR for both, so shift+enter submits
+    // the prompt instead of starting a new line. Terminals that do not
+    // understand the request simply ignore it (ctrl+j then stays available as
+    // the newline key that works everywhere).
+    let _ = execute!(
+        stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, event::DisableBracketedPaste)?;
     terminal.show_cursor()?;
