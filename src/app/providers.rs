@@ -95,12 +95,18 @@ mod tests {
     #[test]
     fn provider_overlay_opens_and_navigates() {
         let mut app = test_app();
+        let start = app.current_provider_index();
         app.open_providers();
-        assert!(matches!(app.overlay, Some(Overlay::Providers { selected: 0 })));
+        assert!(
+            matches!(app.overlay, Some(Overlay::Providers { selected }) if selected == start)
+        );
         app.move_provider_selection(1);
-        assert!(matches!(app.overlay, Some(Overlay::Providers { selected: 1 })));
+        let next = (start + 1) % crate::config::PROVIDERS.len();
+        assert!(
+            matches!(app.overlay, Some(Overlay::Providers { selected }) if selected == next)
+        );
         app.apply_selected_provider();
-        assert_eq!(app.config.provider, "apinex");
+        assert_eq!(app.config.provider, crate::config::PROVIDERS[next].id);
         assert!(app.overlay.is_none());
     }
 }

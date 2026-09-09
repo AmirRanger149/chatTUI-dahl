@@ -72,13 +72,18 @@ Create a `config.json` file in your root folder:
 {
   "dahl_api_key": "your-dahl-key-here",
   "apinex_api_key": "sk-apx-your-apinex-key-here",
+  "openai_api_key": "sk-openai-your-key-here",
+  "anthropic_api_key": "sk-ant-your-key-here",
+  "gemini_api_key": "AIza-your-key-here",
+  "provider": "dahl",
   "temperature": 0.7
 }
 ```
 
 ### Single Provider Examples
 
-If you only use one provider, you can include just that key:
+If you only use one provider, you can include just that key (plus `provider`
+when it isn't Dahl or APInex):
 
 **For APInex:**
 ```json
@@ -94,7 +99,31 @@ If you only use one provider, you can include just that key:
 }
 ```
 
-> **Note:** If only one API key is present in `config.json`, chatTUI will automatically set that provider as the active default on startup. If both keys are present, Dahl is selected by default and you can switch between them anytime using the `/provider` command.
+**For OpenAI:**
+```json
+{
+  "provider": "openai",
+  "openai_api_key": "sk-openai-your-key-here"
+}
+```
+
+**For Anthropic:**
+```json
+{
+  "provider": "anthropic",
+  "anthropic_api_key": "sk-ant-your-key-here"
+}
+```
+
+**For Gemini:**
+```json
+{
+  "provider": "gemini",
+  "gemini_api_key": "AIza-your-key-here"
+}
+```
+
+> **Note:** If only one API key is present in `config.json`, chatTUI will automatically set that provider as the active default on startup. If several keys are present, the first provider in the list that has a key (Dahl, APInex, OpenAI, Anthropic, Gemini) is selected by default and you can switch between them anytime using the `/provider` command — or set `provider` explicitly.
 
 ### Configuration Fields
 
@@ -102,8 +131,17 @@ If you only use one provider, you can include just that key:
 | --- | --- | --- |
 | `dahl_api_key` | API key for Dahl Inference | `None` (or `DAHL_API_KEY` env) |
 | `apinex_api_key` | API key for APInex (`sk-apx...`) | `None` (or `APINEX_API_KEY` env) |
+| `openai_api_key` | API key for OpenAI | `None` (or `OPENAI_API_KEY` env) |
+| `anthropic_api_key` | API key for Anthropic | `None` (or `ANTHROPIC_API_KEY` env) |
+| `gemini_api_key` | API key for Google Gemini | `None` (or `GEMINI_API_KEY` env) |
+| `provider` | Active provider id (`dahl`, `apinex`, `openai`, `anthropic`, `gemini`) | First provider with a key |
 | `temperature` | Sampling temperature for responses | `0.7` |
 | `model` | Optional model name override | Provider default |
+
+> **Endpoints & models.** Each provider's endpoint/model can be overridden
+> with `{ID}_BASE_URL` / `{ID}_MODEL` environment variables (e.g.
+> `ANTHROPIC_BASE_URL`, `GEMINI_MODEL`). The active provider is selected with
+> `/provider openai|anthropic|gemini`.
 
 ### Environment Variables (Alternative)
 
@@ -115,6 +153,11 @@ export DAHL_API_KEY="your-dahl-key"
 
 # APInex
 export APINEX_API_KEY="sk-apx..."
+
+# OpenAI / Anthropic / Gemini (optional)
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+export GEMINI_API_KEY="AIza..."
 
 cargo run --release
 ```

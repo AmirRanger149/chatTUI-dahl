@@ -2,7 +2,6 @@
 //! API), argument resolution for `/model <arg>`, and availability-based
 //! default-model resolution for providers such as APInex.
 
-use crate::api::client::ApiClient;
 use crate::app::{App, Overlay};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError};
@@ -113,12 +112,12 @@ impl App {
     }
 
     fn request_models(&mut self, auto: bool) {
-        let Some(api_key) = self.config.api_key.clone() else {
+        if self.config.api_key.is_none() {
             self.models.loading = false;
             self.models.error = Some("no API key configured".into());
             return;
-        };
-        let client = ApiClient::new(api_key, self.config.base_url.clone());
+        }
+        let client = self.config.api_client();
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let _ = tx.send(client.list_models().await).await;
@@ -297,7 +296,7 @@ impl App {
 /// model list: a free model (the `free/` namespace, e.g.
 /// `free/deepseek-v4-flash-0731`) wins; otherwise the built-in default if it
 /// is still offered; otherwise the first model in the list. The list arrives
-/// sorted case-insensitively (see [`ApiClient::list_models`]), so both the
+/// sorted case-insensitively (see `crate::api::client::ApiClient::list_models`), so both the
 /// free pick and the fallback are deterministic.
 fn pick_available_default(ids: &[String], builtin_default: &str) -> Option<String> {
     if let Some(free) = ids

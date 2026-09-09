@@ -19,11 +19,11 @@ pub mod overlay;
 pub mod providers;
 pub mod streaming;
 
-pub use commands::{SlashCmd, SLASH_COMMANDS};
+pub use commands::SLASH_COMMANDS;
 pub use models::ModelCatalog;
 pub use overlay::Overlay;
 
-use crate::api::client::StreamEvent;
+use crate::api::types::StreamEvent;
 use crate::config::Config;
 use crate::session::manager::SessionManager;
 use anyhow::Result;

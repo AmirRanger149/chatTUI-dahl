@@ -1,7 +1,7 @@
 //! Running a chat request: spawning the background stream, consuming its
 //! token events frame by frame, and reporting elapsed time while it runs.
 
-use crate::api::client::{ApiClient, StreamEvent};
+use crate::api::types::{Message, Role, StreamEvent};
 use crate::app::App;
 use anyhow::Result;
 use std::time::Instant;
@@ -21,27 +21,32 @@ impl App {
     }
 
     pub(crate) fn start_stream(&mut self) -> Result<()> {
-        let Some(api_key) = self.config.api_key.clone() else {
+        if self.config.api_key.is_none() {
             let env_key = crate::config::find_provider(&self.config.provider)
                 .map(|p| p.env_key)
                 .unwrap_or("API_KEY");
             return Err(anyhow::anyhow!(
                 "{env_key} is not configured — set it in config.json or the environment"
             ));
-        };
+        }
         let (tx, rx) = mpsc::channel(64);
-        let messages: Vec<(String, String)> = self
+        let messages: Vec<Message> = self
             .sessions
             .current()
             .messages
             .iter()
             // Reasoning is private to the turn that produced it — never replay
             // `<think>` blocks back to the model.
-            .map(|m| (m.role.clone(), crate::ui::thinking::strip(&m.content)))
+            .map(|m| {
+                Message::new(
+                    Role::from(m.role.as_str()),
+                    crate::ui::thinking::strip(&m.content),
+                )
+            })
             .collect();
         let model = self.config.model.clone();
         let temperature = self.config.temperature;
-        let client = ApiClient::new(api_key, self.config.base_url.clone());
+        let client = self.config.api_client();
         tokio::spawn(async move {
             if let Err(error) = client
                 .stream_chat(&messages, &model, temperature, tx.clone())
