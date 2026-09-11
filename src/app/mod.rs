@@ -100,7 +100,8 @@ impl App {
             should_quit: false,
         };
         app.rebuild_cells();
-        // For providers whose default model is availability-based (APInex),
+        // For providers whose default model is availability-based (custom
+        // providers without an explicit `model`),
         // resolve the default against the endpoint's live model list in the
         // background. Silently keeps the built-in default when the fetch
         // fails or no key is configured.

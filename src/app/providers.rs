@@ -1,4 +1,5 @@
-//! The `/provider` picker: listing the configured providers, switching the
+//! The `/provider` picker: listing the configured providers (the three
+//! built-ins plus the custom gateways from `config.json`), switching the
 //! active one, and updating the model list when the provider changes.
 
 use crate::app::models::ModelCatalog;
@@ -6,7 +7,8 @@ use crate::app::{App, Overlay};
 
 impl App {
     pub fn current_provider_index(&self) -> usize {
-        crate::config::PROVIDERS
+        self.config
+            .providers()
             .iter()
             .position(|p| p.id == self.config.provider)
             .unwrap_or(0)
@@ -18,7 +20,7 @@ impl App {
     }
 
     pub fn move_provider_selection(&mut self, delta: i32) {
-        let len = crate::config::PROVIDERS.len();
+        let len = self.config.providers().len();
         if len == 0 {
             return;
         }
@@ -32,15 +34,16 @@ impl App {
         let Some(Overlay::Providers { selected }) = self.overlay else {
             return;
         };
-        if let Some(provider) = crate::config::PROVIDERS.get(selected) {
-            let id = provider.id;
-            self.set_active_provider(id);
+        let providers = self.config.providers();
+        if let Some(provider) = providers.get(selected) {
+            let id = provider.id.clone();
+            self.set_active_provider(&id);
         }
         self.overlay = None;
     }
 
     pub fn set_active_provider(&mut self, provider_id: &str) {
-        let Some(provider) = crate::config::find_provider(provider_id) else {
+        let Some(provider) = self.config.find_provider(provider_id) else {
             self.push_error(format!("unknown provider: '{provider_id}'"));
             return;
         };
@@ -48,7 +51,7 @@ impl App {
             self.push_notice(format!("provider is already {}", provider.name));
             return;
         }
-        if let Err(err) = self.config.set_provider(provider.id) {
+        if let Err(err) = self.config.set_provider(&provider.id) {
             self.push_error(err);
             return;
         }
@@ -56,9 +59,9 @@ impl App {
         self.models = ModelCatalog::default();
         self.models_rx = None;
         self.models_fetch_auto = false;
-        // APInex's default model is availability-based: resolve it against
-        // the endpoint's live model list in the background (free models
-        // first). Silent no-op without a key or for static-default providers.
+        // Custom providers resolve their default model against the endpoint's
+        // live model list in the background (free models first). Silent
+        // no-op without a key or when the provider pins an explicit model.
         self.request_available_default();
 
         if self.config.api_key.is_some() {
@@ -75,8 +78,9 @@ impl App {
     }
 
     pub fn active_provider_name(&self) -> String {
-        crate::config::find_provider(&self.config.provider)
-            .map(|p| p.name.to_string())
+        self.config
+            .find_provider(&self.config.provider)
+            .map(|p| p.name)
             .unwrap_or_else(|| self.config.provider.clone())
     }
 }
@@ -84,8 +88,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
-    use crate::config::Config;
+    use crate::app::{App, Cell};
+    use crate::config::{Config, CustomProvider};
     use crate::session::manager::SessionManager;
 
     fn test_app() -> App {
@@ -101,12 +105,35 @@ mod tests {
             matches!(app.overlay, Some(Overlay::Providers { selected }) if selected == start)
         );
         app.move_provider_selection(1);
-        let next = (start + 1) % crate::config::PROVIDERS.len();
+        let next = (start + 1) % app.config.providers().len();
         assert!(
             matches!(app.overlay, Some(Overlay::Providers { selected }) if selected == next)
         );
         app.apply_selected_provider();
-        assert_eq!(app.config.provider, crate::config::PROVIDERS[next].id);
+        assert_eq!(app.config.provider, app.config.providers()[next].id);
         assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn switching_to_a_custom_provider_uses_its_endpoint() {
+        let mut app = test_app();
+        app.config.custom_providers.push(CustomProvider {
+            id: "dahl".into(),
+            name: Some("Dahl".into()),
+            base_url: "https://inference.dahl.global/v1".into(),
+            api_key: Some("dahl-key".into()),
+            model: Some("MiniMaxAI/MiniMax-M2.7".into()),
+        });
+        app.set_active_provider("dahl");
+        assert_eq!(app.config.provider, "dahl");
+        assert_eq!(app.config.base_url, "https://inference.dahl.global/v1");
+        assert_eq!(app.config.model, "MiniMaxAI/MiniMax-M2.7");
+        assert_eq!(app.config.api_key.as_deref(), Some("dahl-key"));
+        assert!(matches!(app.cells.last(), Some(Cell::Notice(_))));
+
+        // Unknown ids (no such custom, no such built-in) are reported.
+        app.set_active_provider("apinex");
+        assert_eq!(app.config.provider, "dahl");
+        assert!(matches!(app.cells.last(), Some(Cell::Error(_))));
     }
 }

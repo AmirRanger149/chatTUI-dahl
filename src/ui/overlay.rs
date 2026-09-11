@@ -223,15 +223,20 @@ fn providers(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
     ])];
     lines.push(Line::from(""));
 
-    let selected = selected.min(crate::config::PROVIDERS.len().saturating_sub(1));
-    for (index, provider) in crate::config::PROVIDERS.iter().enumerate() {
+    let registry = app.config.providers();
+    let selected = selected.min(registry.len().saturating_sub(1));
+    for (index, provider) in registry.iter().enumerate() {
         let is_selected = index == selected;
         let is_active = provider.id == app.config.provider;
         let marker = if is_selected { "> " } else { "  " };
-        let has_key = app.config.api_key_for_provider(provider.id).is_some();
+        let has_key = app.config.api_key_for_provider(&provider.id).is_some();
         let key_status = if has_key { "key configured" } else { "no key" };
 
-        let label = format!("{marker}{:<8}  · {}", provider.name, provider.base_url);
+        let custom_tag = if provider.is_custom { "  · custom" } else { "" };
+        let label = format!(
+            "{marker}{:<13} · {}{}",
+            provider.name, provider.base_url, custom_tag
+        );
         let meta = if is_active {
             format!("  · active ({key_status})")
         } else {
@@ -247,6 +252,11 @@ fn providers(frame: &mut Frame, area: Rect, app: &App, selected: usize) {
         };
         lines.push(line);
     }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "add your own OpenAI-compatible endpoint under \"custom_providers\" in config.json",
+        theme::dim(),
+    ));
     render_card(frame, area, lines);
 }
 

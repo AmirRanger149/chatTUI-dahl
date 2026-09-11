@@ -22,8 +22,9 @@ use std::pin::Pin;
 use tokio::sync::mpsc::Sender;
 
 /// The wire protocol a provider speaks. OpenAI and every OpenAI-compatible
-/// gateway (Dahl, APInex, Ollama, Groq, Mistral, Together, …) share one
-/// backend; Anthropic and Gemini each have their own.
+/// gateway (the custom providers in `config.json`: Dahl, APInex, Ollama,
+/// Groq, Mistral, Together, …) share one backend; Anthropic and Gemini each
+/// have their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     OpenAICompatible,
