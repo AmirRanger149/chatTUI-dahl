@@ -1,11 +1,12 @@
 # chatTUI
 
-`chatTUI` is a small, fast terminal chat client for OpenAI-compatible APIs. It is built
+`chatTUI` is a small, fast terminal chat client for OpenAI, Anthropic, Google
+Gemini, and any custom OpenAI-compatible endpoint you add yourself. It is built
 in Rust and designed for people who prefer a focused keyboard workflow over a
 browser window.
 
 The app uses `ratatui` for the interface, `crossterm` for terminal input,
-`tokio` for asynchronous work, and `reqwest` for native OpenAI-compatible SSE streaming.
+`tokio` for asynchronous work, and `reqwest` for native SSE streaming.
 
 ## What You Get
 
@@ -14,7 +15,9 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 - Scrollable conversation view
 - Local conversation history saved as JSON
 - History drawer for returning to previous chats
-- Configurable Dahl model, temperature, and API endpoint
+- Three built-in providers — OpenAI, Anthropic, Google Gemini
+- Custom OpenAI-compatible endpoints (Dahl, APInex, Ollama, Groq, OpenRouter,
+  …) configured directly in `config.json` with your own base URL and key
 - `/model` picker that lists the models the API actually offers (`GET /models`)
   and marks the active one
 - Automatic fallback: if a model rejects the request or is at high demand,
@@ -30,7 +33,10 @@ The app uses `ratatui` for the interface, `crossterm` for terminal input,
 You need:
 
 - Rust and Cargo from [rustup.rs](https://rustup.rs/)
-- An API key from [Dahl Inference](https://inference.dahl.global/) and/or [APInex](https://api.apinex.bond/v1)
+- An API key for at least one provider: [OpenAI](https://platform.openai.com/),
+  [Anthropic](https://www.anthropic.com/), [Google Gemini](https://ai.google.dev/),
+  or any OpenAI-compatible gateway (e.g. [Dahl Inference](https://inference.dahl.global/),
+  [APInex](https://api.apinex.bond/v1), a local Ollama)
 
 Check your Rust installation:
 
@@ -64,40 +70,46 @@ cargo run
 
 `chatTUI` looks for `config.json` in the application directory or the current working directory.
 
+There are two kinds of providers:
+
+- **The 3 main providers** — `openai`, `anthropic`, `gemini` — are built in.
+  You only set their API keys.
+- **Custom providers** — any other OpenAI-compatible endpoint — are defined by
+  you under `custom_providers`, with the base URL and API key right in
+  `config.json`.
+
 ### Full & Complete `config.json` Template
 
 Create a `config.json` file in your root folder:
 
 ```json
 {
-  "dahl_api_key": "your-dahl-key-here",
-  "apinex_api_key": "sk-apx-your-apinex-key-here",
   "openai_api_key": "sk-openai-your-key-here",
   "anthropic_api_key": "sk-ant-your-key-here",
   "gemini_api_key": "AIza-your-key-here",
+  "custom_providers": [
+    {
+      "id": "dahl",
+      "name": "Dahl",
+      "base_url": "https://inference.dahl.global/v1",
+      "api_key": "your-dahl-key-here",
+      "model": "MiniMaxAI/MiniMax-M2.7"
+    },
+    {
+      "id": "apinex",
+      "name": "APInex",
+      "base_url": "https://api.apinex.bond/v1",
+      "api_key": "sk-apx-your-apinex-key-here"
+    }
+  ],
   "provider": "dahl",
   "temperature": 0.7
 }
 ```
 
-### Single Provider Examples
+### The 3 Main Providers
 
-If you only use one provider, you can include just that key (plus `provider`
-when it isn't Dahl or APInex):
-
-**For APInex:**
-```json
-{
-  "apinex_api_key": "sk-apx-your-key-here"
-}
-```
-
-**For Dahl:**
-```json
-{
-  "dahl_api_key": "your-dahl-key-here"
-}
-```
+Each of these only needs a key — the endpoints and default models are built in.
 
 **For OpenAI:**
 ```json
@@ -123,45 +135,116 @@ when it isn't Dahl or APInex):
 }
 ```
 
-> **Note:** If only one API key is present in `config.json`, chatTUI will automatically set that provider as the active default on startup. If several keys are present, the first provider in the list that has a key (Dahl, APInex, OpenAI, Anthropic, Gemini) is selected by default and you can switch between them anytime using the `/provider` command — or set `provider` explicitly.
+### Custom Providers (`custom_providers`)
+
+Any OpenAI-compatible API can be added under `custom_providers`. Each entry is
+a `POST /chat/completions` endpoint with your base URL and key:
+
+| Field | Description |
+| --- | --- |
+| `id` | Unique id used with `/provider <id>` and the `provider` field (lowercase recommended) |
+| `name` | Optional display name (defaults to the id) |
+| `base_url` | OpenAI-compatible base URL, e.g. `https://inference.dahl.global/v1` |
+| `api_key` | API key; the `{ID}_API_KEY` environment variable is the fallback |
+| `model` | Optional default model; when omitted, chatTUI picks one from the endpoint's live model list (a `free/` model first) |
+
+**Example — one custom provider (Dahl):**
+```json
+{
+  "custom_providers": [
+    {
+      "id": "dahl",
+      "name": "Dahl",
+      "base_url": "https://inference.dahl.global/v1",
+      "api_key": "your-dahl-key-here",
+      "model": "MiniMaxAI/MiniMax-M2.7"
+    }
+  ],
+  "provider": "dahl"
+}
+```
+
+**Example — several custom providers side by side:**
+```json
+{
+  "custom_providers": [
+    {
+      "id": "groq",
+      "name": "Groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key": "gsk-your-groq-key-here",
+      "model": "llama-3.3-70b-versatile"
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama (local)",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "llama3.2"
+    },
+    {
+      "id": "apinex",
+      "name": "APInex",
+      "base_url": "https://api.apinex.bond/v1",
+      "api_key": "sk-apx-your-apinex-key-here"
+    }
+  ]
+}
+```
+
+Switch between all providers with the `/provider` popup (custom entries are
+marked `· custom`) or directly with `/provider openai|anthropic|gemini|<custom-id>`.
+
+> **Note:** If only one provider has an API key in `config.json`, chatTUI will
+> automatically set that provider as the active default on startup. If several
+> keys are present, the first provider in the list that has a key (OpenAI,
+> Anthropic, Gemini, then your custom providers in file order) is selected by
+> default and you can switch between them anytime using the `/provider`
+> command — or set `provider` explicitly.
 
 ### Configuration Fields
 
 | Field | Description | Default |
 | --- | --- | --- |
-| `dahl_api_key` | API key for Dahl Inference | `None` (or `DAHL_API_KEY` env) |
-| `apinex_api_key` | API key for APInex (`sk-apx...`) | `None` (or `APINEX_API_KEY` env) |
 | `openai_api_key` | API key for OpenAI | `None` (or `OPENAI_API_KEY` env) |
 | `anthropic_api_key` | API key for Anthropic | `None` (or `ANTHROPIC_API_KEY` env) |
 | `gemini_api_key` | API key for Google Gemini | `None` (or `GEMINI_API_KEY` env) |
-| `provider` | Active provider id (`dahl`, `apinex`, `openai`, `anthropic`, `gemini`) | First provider with a key |
+| `custom_providers` | Your own OpenAI-compatible endpoints (see table above) | `[]` |
+| `provider` | Active provider id (`openai`, `anthropic`, `gemini`, or a custom id) | First provider with a key |
 | `temperature` | Sampling temperature for responses | `0.7` |
-| `model` | Optional model name override | Provider default |
+| `model` | Optional model name override for the active provider | Provider default |
+| `base_url` | Optional endpoint override for the active provider | Provider default |
+
+> **Deprecated fields still work.** Older configs that use `dahl_api_key`,
+> `apinex_api_key`, or the legacy single `api_key` field keep working: those
+> fields are automatically migrated into equivalent `custom_providers` entries
+> on startup (Dahl → `https://inference.dahl.global/v1`, APInex →
+> `https://api.apinex.bond/v1`). New configs should use `custom_providers`.
 
 > **Endpoints & models.** Each provider's endpoint/model can be overridden
 > with `{ID}_BASE_URL` / `{ID}_MODEL` environment variables (e.g.
-> `ANTHROPIC_BASE_URL`, `GEMINI_MODEL`). The active provider is selected with
-> `/provider openai|anthropic|gemini`.
+> `ANTHROPIC_BASE_URL`, `GEMINI_MODEL`, `DAHL_BASE_URL`) — this works for
+> custom providers too.
 
 ### Environment Variables (Alternative)
 
 You can also export environment variables instead of creating a `config.json`:
 
 ```bash
-# Dahl
-export DAHL_API_KEY="your-dahl-key"
-
-# APInex
-export APINEX_API_KEY="sk-apx..."
-
-# OpenAI / Anthropic / Gemini (optional)
+# The 3 main providers
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 export GEMINI_API_KEY="AIza..."
 
+# Custom providers: {ID}_API_KEY, built from the uppercased id
+export DAHL_API_KEY="your-dahl-key"
+export APINEX_API_KEY="sk-apx..."
+
+# Optional endpoint/model overrides for any provider
+export DAHL_BASE_URL="https://inference.dahl.global/v1"
+export GEMINI_MODEL="gemini-2.5-flash"
+
 cargo run --release
 ```
-
 
 ## Using chatTUI
 
@@ -212,8 +295,9 @@ terminal.
 
 Some models expose their private chain of thought by wrapping it in
 `<think> … </think>` before the actual answer. `MiniMaxAI/MiniMax-M2.7` — the
-default model — is one of them. chatTUI understands that format and gives it
-its own animated treatment instead of dumping raw tags into the transcript.
+Dahl example's default model — is one of them. chatTUI understands that format
+and gives it its own animated treatment instead of dumping raw tags into the
+transcript.
 
 **While the model is thinking**, the status row above the composer turns into a
 shimmering indicator with a live preview of the thought being written:
@@ -243,31 +327,42 @@ Notes:
 
 ## Models And Endpoints
 
-The default model is `MiniMaxAI/MiniMax-M2.7`, a reasoning model — see
-[Reasoning Models](#reasoning-models). Change it with `DAHL_MODEL` or
-the `model` value in your config file. The model name must be available through
-Dahl; retrieve current model IDs from its `GET /v1/models` endpoint.
+Each provider has a default model, and you can change it with `{ID}_MODEL`,
+the `model` value in your config (or config file `model` override for the
+active provider), or `/model`. The model name must be available through the
+provider; retrieve current model IDs from its `GET /models` endpoint.
 
-### Availability-Based Default (APInex)
+A custom endpoint must support:
 
-APInex serves a rotating list of models — including free models published
-under the `free/` namespace, e.g. `free/deepseek-v4-flash-0731` — so a
-hardcoded default model can disappear or be replaced. When APInex is the
-active provider (at startup, or after `/provider apinex`), chatTUI fetches
-its live `GET /models` list in the background and sets the default model
-from what is actually available:
+```text
+POST /chat/completions
+```
+
+and, for the `/model` picker and automatic fallback:
+
+```text
+GET /models
+```
+
+### Availability-Based Default (Custom Providers)
+
+Some gateways serve a rotating list of models — including free models
+published under the `free/` namespace, e.g. `free/deepseek-v4-flash-0731` on
+APInex — so a hardcoded default model can disappear or be replaced. When a
+custom provider's entry omits `model` (at startup, or after switching to it
+with `/provider`), chatTUI fetches its live `GET /models` list in the
+background and sets the default model from what is actually available:
 
 1. the first free model (`free/…`), or
-2. the built-in default if it is still offered, or
-3. the first model in the live list.
+2. the first model in the live list.
 
 The pick is announced in the transcript (e.g.
 `APInex default set to available free model: free/deepseek-v4-flash-0731`).
-An explicit choice always wins — a model set with `APINEX_MODEL`, the
-`model` config field, or `/model` is never overridden — and if the fetch
-fails the built-in default stays in effect, with the usual send-time
-fallback covering a model that turns out to be unavailable. The fetched
-list doubles as the cached list shown by the `/model` picker.
+An explicit choice always wins — a model set with `{ID}_MODEL`, the entry's
+`model` field, or `/model` is never overridden — and if the fetch fails the
+send-time fallback still covers it. The fetched list doubles as the cached
+list shown by the `/model` picker. Pin a `model` in the entry whenever you
+want a stable default instead.
 
 ### The `/model` Picker
 
@@ -303,20 +398,6 @@ before any output has been written — a stream that breaks mid-answer is
 reported as-is instead of being spliced onto a second model. Authentication
 failures are reported immediately, since a different model cannot fix those.
 
-The client uses this endpoint internally by default, so it does not need to be
-present in `config.json`:
-
-```text
-https://inference.dahl.global/v1
-```
-
-You may set `DAHL_BASE_URL` for another OpenAI-compatible gateway or proxy. The
-endpoint must support:
-
-```text
-POST /chat/completions
-```
-
 ## Saved Data
 
 Conversation history is stored in the platform data directory, normally:
@@ -332,8 +413,9 @@ your conversations, and protect it if they contain private information.
 
 **The app says the API key is missing**
 
-Set `DAHL_API_KEY` or create the JSON configuration file in the location
-above.
+Set the active provider's key — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`GEMINI_API_KEY` for the built-ins, or the `api_key` of your custom provider
+in `config.json` (its `{ID}_API_KEY` environment variable works too).
 
 **The model is rejected**
 
@@ -344,12 +426,13 @@ transcript.
 
 **The request fails or times out**
 
-Check your network connection, API quota, endpoint URL, and API key. A proxy
-must support OpenAI-compatible streaming responses.
+Check your network connection, API quota, endpoint URL (`base_url` in the
+custom provider's entry), and API key. A custom endpoint must support
+OpenAI-compatible streaming responses.
 
 **A key was exposed**
 
-Revoke it in Dahl and create a replacement.
+Revoke it at the provider it belongs to and create a replacement.
 
 ## License
 

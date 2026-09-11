@@ -22,9 +22,11 @@ impl App {
 
     pub(crate) fn start_stream(&mut self) -> Result<()> {
         if self.config.api_key.is_none() {
-            let env_key = crate::config::find_provider(&self.config.provider)
+            let env_key = self
+                .config
+                .find_provider(&self.config.provider)
                 .map(|p| p.env_key)
-                .unwrap_or("API_KEY");
+                .unwrap_or_else(|| "API_KEY".to_string());
             return Err(anyhow::anyhow!(
                 "{env_key} is not configured — set it in config.json or the environment"
             ));

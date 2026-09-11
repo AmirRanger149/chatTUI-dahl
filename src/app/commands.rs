@@ -14,7 +14,7 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "/history", desc: "Browse saved conversations" },
     SlashCmd { name: "/code", desc: "Browse & copy code blocks" },
     SlashCmd { name: "/model", desc: "Pick a model from the API's list" },
-    SlashCmd { name: "/provider", desc: "Select API provider (Dahl / APInex)" },
+    SlashCmd { name: "/provider", desc: "Select API provider" },
     SlashCmd { name: "/quit", desc: "Exit chatTUI" },
 ];
 
@@ -139,12 +139,14 @@ impl App {
                 if argument.is_empty() {
                     self.open_providers();
                 } else {
-                    if let Some(p) = crate::config::find_provider(&argument) {
-                        self.set_active_provider(p.id);
+                    if let Some(p) = self.config.find_provider(&argument) {
+                        self.set_active_provider(&p.id);
                     } else {
-                        let available = crate::config::PROVIDERS
+                        let available = self
+                            .config
+                            .providers()
                             .iter()
-                            .map(|p| p.id)
+                            .map(|p| p.id.clone())
                             .collect::<Vec<_>>()
                             .join(", ");
                         self.push_error(format!(
@@ -231,6 +233,14 @@ mod tests {
     #[test]
     fn submit_routes_provider_slash_command() {
         let mut app = test_app();
+        // Dahl/APInex-style gateways are now declared as custom providers.
+        app.config.custom_providers.push(crate::config::CustomProvider {
+            id: "apinex".into(),
+            name: Some("APInex".into()),
+            base_url: "https://api.apinex.bond/v1".into(),
+            api_key: None,
+            model: Some("gpt-5-6-terra".into()),
+        });
         app.composer = "/provider apinex".into();
         app.submit();
         assert_eq!(app.config.provider, "apinex");

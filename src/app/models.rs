@@ -1,6 +1,7 @@
 //! The `/model` picker: the model catalog (background-fetched list from the
 //! API), argument resolution for `/model <arg>`, and availability-based
-//! default-model resolution for providers such as APInex.
+//! default-model resolution for custom providers (their config entry may
+//! omit `model`).
 
 use crate::app::{App, Overlay};
 use std::time::{Duration, Instant};
@@ -75,9 +76,11 @@ impl App {
             .trim()
             .is_empty()
         {
-            let env_key = crate::config::find_provider(&self.config.provider)
+            let env_key = self
+                .config
+                .find_provider(&self.config.provider)
                 .map(|p| p.env_key)
-                .unwrap_or("API_KEY");
+                .unwrap_or_else(|| "API_KEY".to_string());
             self.push_error(format!(
                 "set {env_key} in config.json or environment to list models"
             ));
@@ -129,28 +132,28 @@ impl App {
     }
 
     /// Background fetch that resolves an availability-based default model:
-    /// providers such as APInex expose a rotating model list (free models
-    /// live in the `free/` namespace, e.g. `free/deepseek-v4-flash-0731`),
-    /// so the built-in default may not be offered. When it finishes, the
-    /// active model is set to the best available match — provided the user
-    /// has not explicitly chosen one. Failures are silent: the built-in
-    /// default stays in effect and the send-time fallback still covers it.
+    /// a custom provider whose config entry omits `model` gets its active
+    /// model resolved against the endpoint's live list (a free model first,
+    /// e.g. `free/deepseek-v4-flash-0731` on APInex-style gateways). When it
+    /// finishes, the active model is set to the best available match —
+    /// provided the user has not explicitly chosen one. Failures are
+    /// silent: the send-time model fallback still covers an empty choice.
     pub(crate) fn request_available_default(&mut self) {
-        // APInex is the availability-based provider; Dahl keeps its static
-        // default model.
-        if self.config.provider != "apinex" {
+        // Custom providers are the availability-based ones; the built-ins
+        // (OpenAI, Anthropic, Gemini) keep their static default models.
+        let Some(provider) = self.config.find_provider(&self.config.provider) else {
+            return;
+        };
+        if !provider.availability_based_model() {
             return;
         }
         if self.config.api_key.as_deref().unwrap_or("").trim().is_empty() {
             return;
         }
         // Don't override an explicit user choice: a model set through
-        // `APINEX_MODEL`, the config file, or `/model`. Those resolve to
-        // something other than the built-in default.
-        let Some(provider) = crate::config::find_provider(&self.config.provider) else {
-            return;
-        };
-        if !self.config.model.is_empty() && self.config.model != provider.default_model {
+        // `{ID}_MODEL`, the config entry's `model`, or `/model` is
+        // non-empty here.
+        if !self.config.model.is_empty() {
             return;
         }
         if self.models_rx.is_some() || self.models.loading {
@@ -234,34 +237,36 @@ impl App {
     }
 
     /// After a background fetch, set the active model to the best model the
-    /// APInex endpoint currently offers — a free model first (`free/…`),
-    /// then the built-in default if it is still listed, otherwise the first
-    /// model in the list. No-ops when the user has since picked a model
-    /// explicitly.
+    /// endpoint currently offers — a free model first (`free/…`), then the
+    /// provider's configured default if one is set and still listed,
+    /// otherwise the first model in the list. No-ops when the user has since
+    /// picked a model explicitly.
     fn apply_available_default(&mut self) {
-        if self.config.provider != "apinex" {
-            return;
-        }
-        let Some(provider) = crate::config::find_provider(&self.config.provider) else {
+        let Some(provider) = self.config.find_provider(&self.config.provider) else {
             return;
         };
+        if !provider.availability_based_model() {
+            return;
+        }
         // Respect an explicit choice made while the fetch was in flight.
-        if !self.config.model.is_empty() && self.config.model != provider.default_model {
+        if !self.config.model.is_empty() {
             return;
         }
-        let Some(picked) = pick_available_default(&self.models.ids, provider.default_model) else {
+        let Some(picked) = pick_available_default(&self.models.ids, &provider.default_model) else {
             return;
         };
-        if picked == self.config.model {
-            // The built-in default is actually available — nothing to say.
-            return;
-        }
-        let was_free = picked.to_ascii_lowercase().starts_with("free/");
         self.config.model = picked.clone();
+        let was_free = picked.to_ascii_lowercase().starts_with("free/");
         if was_free {
-            self.push_notice(format!("APInex default set to available free model: {picked}"));
+            self.push_notice(format!(
+                "{} default set to available free model: {picked}",
+                provider.name
+            ));
         } else {
-            self.push_notice(format!("APInex default set to available model: {picked}"));
+            self.push_notice(format!(
+                "{} default set to available model: {picked}",
+                provider.name
+            ));
         }
     }
 

@@ -1,7 +1,8 @@
 //! An OpenAI-compatible chat backend. Covers OpenAI itself and every gateway
-//! that speaks the `POST /chat/completions` dialect (Dahl, APInex, Ollama,
-//! Groq, Mistral, Together, Azure OpenAI, …). This is the workhorse backend:
-//! most "custom endpoint" providers are this.
+//! that speaks the `POST /chat/completions` dialect (custom providers such
+//! as Dahl, APInex, Ollama, Groq, Mistral, Together, Azure OpenAI, …). This
+//! is the workhorse backend: every `custom_providers` entry in `config.json`
+//! uses it.
 
 use super::ChatBackend;
 use crate::api::error::{classify_failure, error_detail};
